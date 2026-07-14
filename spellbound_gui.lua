@@ -164,10 +164,13 @@ local function startSelector()
           prevLoaded = SPELL          -- liegt bereit -> dein Klick feuert ihn (no-CD)
         else
           if os.clock() < nextTry then return end
-          local justFired = (prevLoaded == SPELL)   -- wurde gerade gefeuert (unloaded)
+          -- justFired NUR wenn genau der aktuelle SPELL scharf war (sonst schalten wir nur um,
+          -- z.B. Safe->appa; dann darf pending/Rotation NICHT veraendert werden)
+          local justFired = (prevLoaded == SPELL)
           local wasAppa   = (SPELL == APPA_NAME)
-          if prevLoaded then
-            casts = casts + 1; prevLoaded = nil
+          prevLoaded = nil
+          if justFired then
+            casts = casts + 1
             if wasAppa then g.SB_APPA_PENDING = false        -- appa verbraucht -> wieder normal laden
             elseif g.SB_SAFE then rotIdx = rotIdx % #ROT + 1 end
           end
@@ -483,7 +486,7 @@ local function mountGui()
     for i, rb in ipairs(rotBtns) do
       rb.Text = i .. ": " .. tostring(g.SB_SAFE_ROT[i]) .. "  \xe2\x96\xbc"
     end
-    btnAppaLoad.Text = g.SB_APPA_PENDING and "APPA GELADEN - jetzt casten!" or "APPA LADEN"
+    btnAppaLoad.Text = g.SB_APPA_PENDING and "APPA GELADEN - jetzt casten!" or "APPA LADEN  [G]"
     btnAppaLoad.BackgroundColor3 = g.SB_APPA_PENDING and Color3.fromRGB(150,110,40) or Color3.fromRGB(60,120,150)
   end
 
@@ -641,6 +644,8 @@ local function mountGui()
       g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end; render()
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
+    elseif i.KeyCode == Enum.KeyCode.G then
+      g.SB_APPA_PENDING = true; startSelector(); render()   -- APPA LADEN
     end
   end))
 
