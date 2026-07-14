@@ -23,6 +23,7 @@ local g = getgenv()
 -- === Re-Execute-Cleanup: altes vollstaendig killen, keine Zombies ===
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_CURSE, g.SB_COMBO, g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false, false, false
+g.SB_SAFE, g.SB_APPA_PENDING = false, false
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 if g.SB_CONNS then
   for _, c in ipairs(g.SB_CONNS) do pcall(function() c:Disconnect() end) end
@@ -123,6 +124,7 @@ local DEFAULT_ROT = {
   resolveSpell("sectumsempra"), resolveSpell("defodio"),
 }
 if type(g.SB_SAFE_ROT) ~= "table" or #g.SB_SAFE_ROT ~= 4 then g.SB_SAFE_ROT = DEFAULT_ROT end
+local APPA_NAME = resolveSpell("appa")   -- fuer den "APPA LADEN"-Knopf
 
 local function startSelector()
   if g.SB_CURSE_LOOP then return end
@@ -134,7 +136,7 @@ local function startSelector()
     local prevLoaded, casts = nil, 0
     local rotIdx = 1
     local nextAcquire, nextTry = 0, 0
-    while g.SB_CURSE or g.SB_AIM or g.SB_SAFE do
+    while g.SB_CURSE or g.SB_AIM or g.SB_SAFE or g.SB_APPA_PENDING do
       pcall(function()
         local char = lp.Character
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
@@ -153,20 +155,24 @@ local function startSelector()
         g.SB_STATUS = nil
         -- Safe Combat rotiert durch SAFE_ROT; sonst der fixe Auto-Spell
         local ROT = g.SB_SAFE_ROT
+        -- Prioritaet: appa-Zwischenladung > Safe-Rotation > fixer Auto-Spell
         local SPELL
-        if g.SB_SAFE then SPELL = ROT[rotIdx] else SPELL = g.SB_SPELL or "avada kedavra" end
+        if g.SB_APPA_PENDING then SPELL = APPA_NAME
+        elseif g.SB_SAFE then SPELL = ROT[rotIdx]
+        else SPELL = g.SB_SPELL or "avada kedavra" end
         if state.loadedSpell == SPELL then
           prevLoaded = SPELL          -- liegt bereit -> dein Klick feuert ihn (no-CD)
         else
           if os.clock() < nextTry then return end
           local justFired = (prevLoaded == SPELL)   -- wurde gerade gefeuert (unloaded)
+          local wasAppa   = (SPELL == APPA_NAME)
           if prevLoaded then
             casts = casts + 1; prevLoaded = nil
-            if g.SB_SAFE then rotIdx = rotIdx % #ROT + 1 end   -- nach jedem Feuern weiterrotieren
+            if wasAppa then g.SB_APPA_PENDING = false        -- appa verbraucht -> wieder normal laden
+            elseif g.SB_SAFE then rotIdx = rotIdx % #ROT + 1 end
           end
-          -- COMBO nur im Auto-Spell-Modus (nicht bei Safe Combat): Zweitspell laden,
-          -- ~0.1s Settle, dann via echte fireSpell-Closure feuern (server-akzeptiert).
-          if justFired and not g.SB_SAFE and g.SB_COMBO and fireSpell and g.SB_COMBO_SPELL and g.SB_COMBO_SPELL ~= SPELL then
+          -- COMBO nur im reinen Auto-Spell-Modus (nicht safe, nicht appa)
+          if justFired and not wasAppa and not g.SB_SAFE and g.SB_COMBO and fireSpell and g.SB_COMBO_SPELL and g.SB_COMBO_SPELL ~= SPELL then
             local tgt = (u13 and u13.Hit and u13.Hit.Position)
             state.casts = 0
             setLoadedSpell(g.SB_COMBO_SPELL, true)
@@ -178,9 +184,11 @@ local function startSelector()
               task.wait(0.05)
             end
           end
-          -- naechsten Spell scharfmachen (casts=0 = Cooldown-Bypass);
-          -- bei Safe Combat ist rotIdx ggf. schon weitergerueckt -> laedt den naechsten
-          local NEXT = g.SB_SAFE and ROT[rotIdx] or SPELL
+          -- naechsten Spell bestimmen (appa hat Vorrang, sonst Rotation/Auto-Spell)
+          local NEXT
+          if g.SB_APPA_PENDING then NEXT = APPA_NAME
+          elseif g.SB_SAFE then NEXT = ROT[rotIdx]
+          else NEXT = g.SB_SPELL or "avada kedavra" end
           state.casts = 0
           setLoadedSpell(NEXT, true)
           if state.loadedSpell == NEXT then prevLoaded, nextTry = NEXT, 0
@@ -377,7 +385,7 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.Parent = parent
 
   local main = Instance.new("Frame")
-  main.Size = UDim2.fromOffset(240, 566)
+  main.Size = UDim2.fromOffset(240, 594)
   main.Position = UDim2.fromScale(0.5, 0.3)
   main.BackgroundColor3 = Color3.fromRGB(24, 22, 34)
   main.BorderSizePixel = 0; main.Active = true; main.Parent = gui
@@ -424,18 +432,19 @@ local function mountGui()
   local btnRot3  = mkButton(474, 24)  -- Rotation Slot 3
   local btnRot4  = mkButton(500, 24)  -- Rotation Slot 4
   local rotBtns  = { btnRot1, btnRot2, btnRot3, btnRot4 }
+  local btnAppaLoad = mkButton(528, 30)  -- appa in die Hand laden (dann selbst casten)
 
   local status = Instance.new("TextLabel")
-  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 532)
+  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 562)
   status.BackgroundTransparency = 1; status.Font = Enum.Font.Gotham; status.TextSize = 12
   status.TextColor3 = Color3.fromRGB(170, 160, 200); status.TextXAlignment = Enum.TextXAlignment.Left
   status.Text = "bereit"; status.Parent = main
 
   -- Ein-/Ausklappen (Header bleibt sichtbar; Hotkeys laufen unabhaengig weiter)
   local openList   -- offenes Dropdown (von Spell-/Exempt-/Appa-Listen genutzt)
-  local FULL_H = 566
+  local FULL_H = 594
   local collapsed = false
-  local content = { btnAuto, ddAuto, btnCombo, ddCombo, btnAim, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, status }
+  local content = { btnAuto, ddAuto, btnCombo, ddCombo, btnAim, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
   local function setCollapsed(v)
     collapsed = v
     for _, c in ipairs(content) do c.Visible = not v end
@@ -452,7 +461,7 @@ local function mountGui()
   for _, rb in ipairs(rotBtns) do rb.BackgroundColor3 = Color3.fromRGB(34, 44, 40); rb.TextSize = 12 end
 
   local function render()
-    btnAuto.Text = g.SB_CURSE and "AUTO-SPELL: AN  [G]" or "AUTO-SPELL: AUS  [G]"
+    btnAuto.Text = g.SB_CURSE and "AUTO-SPELL: AN" or "AUTO-SPELL: AUS"
     btnAuto.BackgroundColor3 = g.SB_CURSE and Color3.fromRGB(56,150,78) or Color3.fromRGB(150,56,62)
     ddAuto.Text = "Spell: " .. tostring(g.SB_SPELL) .. "  \xe2\x96\xbc"
     btnCombo.Text = g.SB_COMBO and "COMBO: AN" or "COMBO: AUS"
@@ -469,11 +478,13 @@ local function mountGui()
     btnAppa.Text = "Appa-Ziel: " .. tostring(g.SB_APPA_TARGET or "-") .. "  \xe2\x96\xbc"
     btnAppaGo.Text = "\xe2\x86\x92 APPARATE  [T]"
     btnAppaGo.BackgroundColor3 = Color3.fromRGB(60, 120, 150)
-    btnSafe.Text = g.SB_SAFE and "SAFE COMBAT: AN  [B]" or "SAFE COMBAT: AUS  [B]"
+    btnSafe.Text = g.SB_SAFE and "SAFE COMBAT: AN" or "SAFE COMBAT: AUS"
     btnSafe.BackgroundColor3 = g.SB_SAFE and Color3.fromRGB(56,150,78) or Color3.fromRGB(70,62,96)
     for i, rb in ipairs(rotBtns) do
       rb.Text = i .. ": " .. tostring(g.SB_SAFE_ROT[i]) .. "  \xe2\x96\xbc"
     end
+    btnAppaLoad.Text = g.SB_APPA_PENDING and "APPA GELADEN - jetzt casten!" or "APPA LADEN"
+    btnAppaLoad.BackgroundColor3 = g.SB_APPA_PENDING and Color3.fromRGB(150,110,40) or Color3.fromRGB(60,120,150)
   end
 
   -- Dropdown (scrollbare Liste ueber dem Button)
@@ -583,6 +594,11 @@ local function mountGui()
     if not ok then g.SB_STATUS = "Appa: " .. tostring(err) end
     render()
   end)
+  btnAppaLoad.MouseButton1Click:Connect(function()
+    g.SB_APPA_PENDING = true      -- laedt appa in die Hand; nach dem Cast wieder normal
+    startSelector()               -- Loop laeuft (auch ohne Auto-Spell/Safe)
+    render()
+  end)
 
   btnAuto.MouseButton1Click:Connect(function()
     g.SB_CURSE = not g.SB_CURSE
@@ -617,9 +633,7 @@ local function mountGui()
 
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
     if gp then return end
-    if i.KeyCode == Enum.KeyCode.G then
-      g.SB_CURSE = not g.SB_CURSE; if g.SB_CURSE then startSelector() end; render()
-    elseif i.KeyCode == Enum.KeyCode.F then
+    if i.KeyCode == Enum.KeyCode.F then
       g.SB_AIM = not g.SB_AIM; if g.SB_AIM then if not g.SB_SAFE then g.SB_CURSE = true end; startSelector(); startAim() end; render()
     elseif i.KeyCode == Enum.KeyCode.H then
       g.SB_SHIELD = not g.SB_SHIELD; if g.SB_SHIELD then hookShield() end; render()
@@ -627,8 +641,6 @@ local function mountGui()
       g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end; render()
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
-    elseif i.KeyCode == Enum.KeyCode.B then
-      g.SB_SAFE = not g.SB_SAFE; if g.SB_SAFE then g.SB_CURSE = false; startSelector() end; render()
     end
   end))
 
@@ -643,7 +655,7 @@ local function mountGui()
         elseif g.SB_CURSE then status.Text = "geladen: " .. tostring(g.SB_LOADED or "...")
         else status.Text = "Auto-Clash scharf" end
       else
-        status.Text = "G Auto | F Aim | H Shield | P Clash | T Appa | B Safe"
+        status.Text = "F Aim | H Shield | P Clash | T Appa"
       end
       task.wait(0.15)
     end
