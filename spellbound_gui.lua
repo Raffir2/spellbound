@@ -22,17 +22,17 @@ local g = getgenv()
 
 -- === Re-Execute-Cleanup: altes vollstaendig killen, keine Zombies ===
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
-g.SB_CURSE, g.SB_COMBO, g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false, false, false
+g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
 g.SB_SAFE, g.SB_APPA_PENDING = false, false
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
+g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
+g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
 if g.SB_CONNS then
   for _, c in ipairs(g.SB_CONNS) do pcall(function() c:Disconnect() end) end
 end
 g.SB_CONNS = {}
 -- Shield-Listener bleibt idempotent ueber SB_SHIELD_HOOKED (nicht doppelt legen).
 
-g.SB_SPELL       = g.SB_SPELL       or "avada kedavra"
-g.SB_COMBO_SPELL = g.SB_COMBO_SPELL or "stupefy"
 g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
@@ -125,84 +125,132 @@ local DEFAULT_ROT = {
 }
 if type(g.SB_SAFE_ROT) ~= "table" or #g.SB_SAFE_ROT ~= 4 then g.SB_SAFE_ROT = DEFAULT_ROT end
 local APPA_NAME = resolveSpell("appa")   -- fuer den "APPA LADEN"-Knopf
+g.SB_ROT_IDX = tonumber(g.SB_ROT_IDX) or 1
+g.SB_LAST_CAST = g.SB_LAST_CAST or 0
+
+-- Zustands-Checks via CollectionService-Tags (so prueft es die Spiel-Logik intern)
+local CS = game:GetService("CollectionService")
+local function charHasTag(tag)
+  local ch = lp.Character
+  return ch ~= nil and CS:HasTag(ch, tag)
+end
+local function isRagdolled() return charHasTag("Ragdoll") end
+local function isStunnedOrBound()
+  return charHasTag("stunned") or charHasTag("binded") or charHasTag("immobilized")
+end
+
+-- appa als echten Unique-Cast auf eine Zielposition (Packet-Pfad, wie beim Capture)
+local function castApparToPos(target)
+  if not (okPk and packets and packets.loadSpellReplication and packets.uniqueSpellReplication) then return end
+  local mychar = lp.Character
+  local myroot = mychar and mychar:FindFirstChild("HumanoidRootPart")
+  local wand   = mychar and mychar:FindFirstChildWhichIsA("Tool")
+  if not (myroot and wand) then return end
+  local origin = myroot.Position
+  target = target or (origin + myroot.CFrame.LookVector * 60)
+  local guid = Http:GenerateGUID(false)
+  if okReg and registry then registry[guid] = true end
+  packets.loadSpellReplication.send({ spell = "appa", enabled = true, wand = wand })
+  packets.uniqueSpellReplication.send({
+    serverTimeAtFire = workspace:GetServerTimeNow(), spellId = guid,
+    origin = origin, target = target, spellName = "appa", wand = wand,
+  })
+end
+
+-- feuert den aktuellen Rotations-Slot. instant=true -> schon vorgeladen, kein Load/Wait.
+local function fireSafeSlot(instant)
+  local refs = g.SB_REFS
+  if not (refs and refs.set and refs.state and refs.fire) then return end
+  if isStunnedOrBound() then return end            -- kein Equip/Cast wenn stunned/bound
+  local set, state, fire = refs.set, refs.state, refs.fire
+  local u13 = g.SB_MOUSE
+  local target = u13 and u13.Hit and u13.Hit.Position
+  local ROT = g.SB_SAFE_ROT
+  local idx = g.SB_ROT_IDX
+  local spell = ROT[idx] or ROT[1]
+  if not instant then
+    state.casts = 0
+    set(spell, true)
+    task.wait(0.07)                                -- Server den Load registrieren lassen
+  end
+  if state.loadedSpell == spell then
+    state.casts = 0
+    pcall(fire, target)
+    g.SB_CASTS = (tonumber(g.SB_CASTS) or 0) + 1
+    g.SB_LOADED = spell
+  end
+  g.SB_PRELOADED = nil
+  g.SB_LAST_CAST = os.clock()
+  g.SB_ROT_IDX = (idx % #ROT) + 1                  -- IMMER weiterrotieren (kein Haengenbleiben)
+end
+
+-- Ein Klick = aktuellen Spell casten (vorgeladen -> sofort, sonst load+wait)
+local function castCurrent()
+  if g.SB_APPA_PENDING then                        -- appa hat Vorrang, danach NICHTS nachladen
+    local u13 = g.SB_MOUSE
+    castApparToPos(u13 and u13.Hit and u13.Hit.Position)
+    g.SB_APPA_PENDING = false; g.SB_LAST_CAST = os.clock(); return
+  end
+  if not g.SB_SAFE then return end
+  fireSafeSlot(g.SB_PRELOADED ~= nil)
+end
 
 local function startSelector()
+  -- Klick-Caster EINMALIG verbinden (liest Refs live aus g.SB_REFS)
+  if not g.SB_CLICK_HOOKED then
+    g.SB_CLICK_HOOKED = true
+    table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
+      if gp then return end                                   -- Klick auf GUI ignorieren
+      if i.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+      if not (g.SB_SAFE or g.SB_APPA_PENDING) then return end
+      if g.SB_CASTING then return end                         -- kein Ueberlappen
+      g.SB_CASTING = true
+      task.spawn(function() pcall(castCurrent); g.SB_CASTING = false end)
+    end))
+  end
+  -- Hintergrund-Acquirer: haelt g.SB_REFS/g.SB_MOUSE aktuell (gedrosselt, kein per-Klick getgc)
   if g.SB_CURSE_LOOP then return end
   g.SB_CURSE_LOOP = true
   task.spawn(function()
-    local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
-    local u13 = okM and pm and pm:GetMouse() or nil
-    local setLoadedSpell, state, fireSpell
-    local prevLoaded, casts = nil, 0
-    local rotIdx = 1
-    local nextAcquire, nextTry = 0, 0
-    while g.SB_CURSE or g.SB_AIM or g.SB_SAFE or g.SB_APPA_PENDING do
+    local nextAcquire = 0
+    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING do
       pcall(function()
+        if not g.SB_MOUSE then
+          local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
+          g.SB_MOUSE = okM and pm and pm:GetMouse() or nil
+        end
         local char = lp.Character
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
         local wand = char and char:FindFirstChildWhichIsA("Tool")
-        if not (char and hum and hum.Health > 0 and wand) then       -- keine Wand -> kein getgc (Anti-Lag)
-          setLoadedSpell, state, fireSpell, prevLoaded = nil, nil, nil, nil
-          g.SB_LOADED, g.SB_STATUS = nil, "keine Wand in der Hand"
-          return
+        if not (char and hum and hum.Health > 0 and wand) then
+          g.SB_REFS = nil; g.SB_STATUS = "keine Wand in der Hand"; return
         end
-        if not setLoadedSpell or not state or not state.equipped then  -- getgc gedrosselt
+        local refs = g.SB_REFS
+        if not (refs and refs.state and refs.state.equipped) then
           if os.clock() < nextAcquire then g.SB_STATUS = "warte auf Wand..."; return end
           nextAcquire = os.clock() + 1.5
-          setLoadedSpell, state, fireSpell = acquire()
-          if not (setLoadedSpell and state and state.equipped) then g.SB_STATUS = "lade Wand..."; return end
+          local set, st, fire = acquire()
+          if set and st and st.equipped and fire then
+            g.SB_REFS = { set = set, state = st, fire = fire }
+          else g.SB_STATUS = "lade Wand..."; return end
+          refs = g.SB_REFS
         end
         g.SB_STATUS = nil
-        -- Safe Combat rotiert durch SAFE_ROT; sonst der fixe Auto-Spell
-        local ROT = g.SB_SAFE_ROT
-        -- Prioritaet: appa-Zwischenladung > Safe-Rotation > fixer Auto-Spell
-        local SPELL
-        if g.SB_APPA_PENDING then SPELL = APPA_NAME
-        elseif g.SB_SAFE then SPELL = ROT[rotIdx]
-        else SPELL = g.SB_SPELL or "avada kedavra" end
-        if state.loadedSpell == SPELL then
-          prevLoaded = SPELL          -- liegt bereit -> dein Klick feuert ihn (no-CD)
-        else
-          if os.clock() < nextTry then return end
-          -- justFired NUR wenn genau der aktuelle SPELL scharf war (sonst schalten wir nur um,
-          -- z.B. Safe->appa; dann darf pending/Rotation NICHT veraendert werden)
-          local justFired = (prevLoaded == SPELL)
-          local wasAppa   = (SPELL == APPA_NAME)
-          prevLoaded = nil
-          if justFired then
-            casts = casts + 1
-            if wasAppa then g.SB_APPA_PENDING = false        -- appa verbraucht -> wieder normal laden
-            elseif g.SB_SAFE then rotIdx = rotIdx % #ROT + 1 end
+        -- Vor-Equip: nach 0.4s ohne Cast den aktuellen Slot schon laden (naechster Klick feuert sofort)
+        if g.SB_SAFE and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
+           and refs and refs.set and refs.state and not isStunnedOrBound() then
+          if (os.clock() - (g.SB_LAST_CAST or 0)) >= 0.4 then
+            local spell = g.SB_SAFE_ROT[g.SB_ROT_IDX] or g.SB_SAFE_ROT[1]
+            refs.state.casts = 0
+            refs.set(spell, true)
+            if refs.state.loadedSpell == spell then g.SB_PRELOADED = spell end
           end
-          -- COMBO nur im reinen Auto-Spell-Modus (nicht safe, nicht appa)
-          if justFired and not wasAppa and not g.SB_SAFE and g.SB_COMBO and fireSpell and g.SB_COMBO_SPELL and g.SB_COMBO_SPELL ~= SPELL then
-            local tgt = (u13 and u13.Hit and u13.Hit.Position)
-            state.casts = 0
-            setLoadedSpell(g.SB_COMBO_SPELL, true)
-            task.wait(0.1)
-            if state.loadedSpell == g.SB_COMBO_SPELL then
-              state.casts = 0
-              pcall(fireSpell, tgt)
-              g.SB_COMBO_CASTS = (tonumber(g.SB_COMBO_CASTS) or 0) + 1
-              task.wait(0.05)
-            end
-          end
-          -- naechsten Spell bestimmen (appa hat Vorrang, sonst Rotation/Auto-Spell)
-          local NEXT
-          if g.SB_APPA_PENDING then NEXT = APPA_NAME
-          elseif g.SB_SAFE then NEXT = ROT[rotIdx]
-          else NEXT = g.SB_SPELL or "avada kedavra" end
-          state.casts = 0
-          setLoadedSpell(NEXT, true)
-          if state.loadedSpell == NEXT then prevLoaded, nextTry = NEXT, 0
-          else nextTry = os.clock() + 0.4 end
         end
-        g.SB_LOADED, g.SB_CASTS = state.loadedSpell, casts
       end)
-      task.wait(0.05)
+      task.wait(0.1)
     end
     g.SB_CURSE_LOOP = false
-    g.SB_LOADED, g.SB_STATUS = nil, nil
+    g.SB_STATUS = nil
   end)
 end
 
@@ -252,6 +300,7 @@ local function hookShield()
   packets.fireSpellReplication.listen(function(pl)
     if not g.SB_SHIELD then return end
     if lp:GetAttribute("Client_IsClashing") == true then return end   -- waehrend Clash kein Shield
+    if isRagdolled() then return end                                  -- kein Shield wenn ragdollt
     local wand = pl and pl.wand; if not wand then return end
     local cc = wand:FindFirstAncestorWhichIsA("Model"); if not cc then return end
     if Players:GetPlayerFromCharacter(cc) == lp then return end
@@ -388,7 +437,7 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.Parent = parent
 
   local main = Instance.new("Frame")
-  main.Size = UDim2.fromOffset(240, 594)
+  main.Size = UDim2.fromOffset(240, 452)
   main.Position = UDim2.fromScale(0.5, 0.3)
   main.BackgroundColor3 = Color3.fromRGB(24, 22, 34)
   main.BorderSizePixel = 0; main.Active = true; main.Parent = gui
@@ -419,35 +468,31 @@ local function mountGui()
     return b
   end
 
-  local btnAuto  = mkButton(38, 34)   -- AUTO-SPELL toggle (G)
-  local ddAuto   = mkButton(76, 28)   -- Auto-Spell auswaehlen
-  local btnCombo = mkButton(108, 34)  -- COMBO toggle
-  local ddCombo  = mkButton(146, 28)  -- Combo-Spell auswaehlen
-  local btnAim   = mkButton(178, 34)  -- SILENT-AIM toggle (F)
-  local btnShield= mkButton(216, 34)  -- AUTO-SHIELD toggle (H)
-  local btnClash = mkButton(254, 34)  -- AUTO-CLASH toggle (P)
-  local btnExempt= mkButton(292, 28)  -- Silent-Aim Ausnahmen (Whitelist)
-  local btnAppa  = mkButton(324, 28)  -- Apparate-Ziel waehlen (TP mit Taste T)
-  local btnAppaGo= mkButton(356, 30)  -- Apparate JETZT (Button + Taste T)
-  local btnSafe  = mkButton(390, 30)  -- SAFE COMBAT toggle (B) - ersetzt Auto-Spell
-  local btnRot1  = mkButton(422, 24)  -- Rotation Slot 1
-  local btnRot2  = mkButton(448, 24)  -- Rotation Slot 2
-  local btnRot3  = mkButton(474, 24)  -- Rotation Slot 3
-  local btnRot4  = mkButton(500, 24)  -- Rotation Slot 4
+  local btnAim   = mkButton(38, 34)   -- SILENT-AIM toggle (F)
+  local btnShield= mkButton(76, 34)   -- AUTO-SHIELD toggle (H)
+  local btnClash = mkButton(114, 34)  -- AUTO-CLASH toggle (P)
+  local btnExempt= mkButton(152, 28)  -- Silent-Aim Ausnahmen (Whitelist)
+  local btnAppa  = mkButton(184, 28)  -- Apparate-Ziel waehlen (TP mit Taste T)
+  local btnAppaGo= mkButton(216, 30)  -- Apparate JETZT (Button + Taste T)
+  local btnSafe  = mkButton(250, 30)  -- SAFE COMBAT toggle (Click-Cast Rotation)
+  local btnRot1  = mkButton(284, 24)  -- Rotation Slot 1
+  local btnRot2  = mkButton(310, 24)  -- Rotation Slot 2
+  local btnRot3  = mkButton(336, 24)  -- Rotation Slot 3
+  local btnRot4  = mkButton(362, 24)  -- Rotation Slot 4
   local rotBtns  = { btnRot1, btnRot2, btnRot3, btnRot4 }
-  local btnAppaLoad = mkButton(528, 30)  -- appa in die Hand laden (dann selbst casten)
+  local btnAppaLoad = mkButton(390, 30)  -- appa in die Hand laden (Taste G)
 
   local status = Instance.new("TextLabel")
-  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 562)
+  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 424)
   status.BackgroundTransparency = 1; status.Font = Enum.Font.Gotham; status.TextSize = 12
   status.TextColor3 = Color3.fromRGB(170, 160, 200); status.TextXAlignment = Enum.TextXAlignment.Left
   status.Text = "bereit"; status.Parent = main
 
   -- Ein-/Ausklappen (Header bleibt sichtbar; Hotkeys laufen unabhaengig weiter)
   local openList   -- offenes Dropdown (von Spell-/Exempt-/Appa-Listen genutzt)
-  local FULL_H = 594
+  local FULL_H = 452
   local collapsed = false
-  local content = { btnAuto, ddAuto, btnCombo, ddCombo, btnAim, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
+  local content = { btnAim, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
   local function setCollapsed(v)
     collapsed = v
     for _, c in ipairs(content) do c.Visible = not v end
@@ -457,19 +502,11 @@ local function mountGui()
   end
   collapseBtn.MouseButton1Click:Connect(function() setCollapsed(not collapsed) end)
 
-  ddAuto.BackgroundColor3   = Color3.fromRGB(40, 36, 58)
-  ddCombo.BackgroundColor3  = Color3.fromRGB(40, 36, 58)
   btnExempt.BackgroundColor3 = Color3.fromRGB(40, 36, 58)
   btnAppa.BackgroundColor3   = Color3.fromRGB(40, 36, 58)
   for _, rb in ipairs(rotBtns) do rb.BackgroundColor3 = Color3.fromRGB(34, 44, 40); rb.TextSize = 12 end
 
   local function render()
-    btnAuto.Text = g.SB_CURSE and "AUTO-SPELL: AN" or "AUTO-SPELL: AUS"
-    btnAuto.BackgroundColor3 = g.SB_CURSE and Color3.fromRGB(56,150,78) or Color3.fromRGB(150,56,62)
-    ddAuto.Text = "Spell: " .. tostring(g.SB_SPELL) .. "  \xe2\x96\xbc"
-    btnCombo.Text = g.SB_COMBO and "COMBO: AN" or "COMBO: AUS"
-    btnCombo.BackgroundColor3 = g.SB_COMBO and Color3.fromRGB(150,110,40) or Color3.fromRGB(70,62,96)
-    ddCombo.Text = "Combo: " .. tostring(g.SB_COMBO_SPELL) .. "  \xe2\x96\xbc"
     btnAim.Text = g.SB_AIM and "SILENT-AIM: AN  [F]" or "SILENT-AIM: AUS  [F]"
     btnAim.BackgroundColor3 = g.SB_AIM and Color3.fromRGB(200,130,40) or Color3.fromRGB(70,62,96)
     btnShield.Text = g.SB_SHIELD and "AUTO-SHIELD: AN  [H]" or "AUTO-SHIELD: AUS  [H]"
@@ -516,8 +553,6 @@ local function mountGui()
       openList = sf
     end)
   end
-  makeDropdown(ddAuto,  function(n) g.SB_SPELL = n end)
-  makeDropdown(ddCombo, function(n) g.SB_COMBO_SPELL = n end)
   for i, rb in ipairs(rotBtns) do
     makeDropdown(rb, function(n) g.SB_SAFE_ROT[i] = n end)
   end
@@ -598,29 +633,19 @@ local function mountGui()
     render()
   end)
   btnAppaLoad.MouseButton1Click:Connect(function()
-    g.SB_APPA_PENDING = true      -- laedt appa in die Hand; nach dem Cast wieder normal
-    startSelector()               -- Loop laeuft (auch ohne Auto-Spell/Safe)
+    g.SB_APPA_PENDING = true      -- naechster Klick castet appa; danach nichts nachladen
+    startSelector()
     render()
   end)
 
-  btnAuto.MouseButton1Click:Connect(function()
-    g.SB_CURSE = not g.SB_CURSE
-    if g.SB_CURSE then g.SB_SAFE = false; startSelector() end
-    render()
-  end)
   btnSafe.MouseButton1Click:Connect(function()
     g.SB_SAFE = not g.SB_SAFE
-    if g.SB_SAFE then g.SB_CURSE = false; startSelector() end   -- ersetzt Auto-Spell
-    render()
-  end)
-  btnCombo.MouseButton1Click:Connect(function()
-    g.SB_COMBO = not g.SB_COMBO
-    if g.SB_COMBO then g.SB_CURSE = true; startSelector() end   -- Combo braucht den Auto-Spell-Loop
+    if g.SB_SAFE then startSelector() end   -- Click-Cast-Rotation
     render()
   end)
   btnAim.MouseButton1Click:Connect(function()
     g.SB_AIM = not g.SB_AIM
-    if g.SB_AIM then if not g.SB_SAFE then g.SB_CURSE = true end; startSelector(); startAim() end
+    if g.SB_AIM then startSelector(); startAim() end
     render()
   end)
   btnShield.MouseButton1Click:Connect(function()
@@ -637,7 +662,7 @@ local function mountGui()
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
     if gp then return end
     if i.KeyCode == Enum.KeyCode.F then
-      g.SB_AIM = not g.SB_AIM; if g.SB_AIM then if not g.SB_SAFE then g.SB_CURSE = true end; startSelector(); startAim() end; render()
+      g.SB_AIM = not g.SB_AIM; if g.SB_AIM then startSelector(); startAim() end; render()
     elseif i.KeyCode == Enum.KeyCode.H then
       g.SB_SHIELD = not g.SB_SHIELD; if g.SB_SHIELD then hookShield() end; render()
     elseif i.KeyCode == Enum.KeyCode.P then
@@ -652,15 +677,16 @@ local function mountGui()
   task.spawn(function()
     while gui.Parent do
       render()
-      if g.SB_CURSE or g.SB_AIM or g.SB_CLASH or g.SB_SAFE then
+      if g.SB_APPA_PENDING then
+        status.Text = "APPA bereit - Klick zum Casten"
+      elseif g.SB_AIM or g.SB_CLASH or g.SB_SAFE then
         if g.SB_STATUS then status.Text = tostring(g.SB_STATUS)
         elseif g.SB_CLASH and lp:GetAttribute("Client_IsClashing") == true then status.Text = "Clash aktiv - Hits: " .. tostring(g.SB_CLASH_HITS or 0)
-        elseif g.SB_SAFE then status.Text = "Safe Combat: " .. tostring(g.SB_LOADED or "...")
+        elseif g.SB_SAFE then status.Text = "Safe: naechster -> " .. tostring(g.SB_SAFE_ROT[g.SB_ROT_IDX] or "?")
         elseif g.SB_AIM then status.Text = "Silent-Aim: " .. (g.SB_AIM_TARGET and ("-> " .. tostring(g.SB_AIM_TARGET)) or "(Cursor)")
-        elseif g.SB_CURSE then status.Text = "geladen: " .. tostring(g.SB_LOADED or "...")
         else status.Text = "Auto-Clash scharf" end
       else
-        status.Text = "F Aim | H Shield | P Clash | T Appa"
+        status.Text = "F Aim | H Shield | P Clash | T Appa | G Appa-Load"
       end
       task.wait(0.15)
     end
