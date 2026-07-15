@@ -29,6 +29,7 @@ g.SB_SAFE, g.SB_APPA_PENDING = false, false
 g.SB_DODGE = false               -- reaktiver Auto-Dodge (ROLL via LeftControl)
 g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
 g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
+g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel % ALLER Cheat-Aktionen failen absichtlich
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
@@ -49,6 +50,16 @@ g.SB_AIM_PROJSPEED = g.SB_AIM_PROJSPEED or 250          -- Fallback, falls Spell
 g.SB_AIM_DETECTED  = g.SB_AIM_DETECTED  or 0            -- zuletzt automatisch erkannte Speed
 g.SB_AIM_DETSPELL  = g.SB_AIM_DETSPELL  or nil          -- Name des erkannten Spells
 g.SB_APPA_TARGET = g.SB_APPA_TARGET or nil  -- Name des Apparate-Ziels (Taste T)
+
+-- Legitness-Gate: mit SB_LEGIT% Wahrscheinlichkeit "failt" diese Aktion (return true = auslassen).
+-- 0% -> nie, 100% -> immer. Wird an JEDER diskreten Cheat-Aktion abgefragt (Aim/Dodge/Shield/Clash/Cast).
+local legitRng = Random.new()
+local function legitFail()
+  local lg = tonumber(g.SB_LEGIT) or 0
+  if lg <= 0 then return false end
+  if lg >= 100 then return true end
+  return legitRng:NextNumber(0, 100) < lg
+end
 
 -- gemeinsame Helper zum Finden der eigenen WandClient-Closures
 local function hasConsts(f, need)
@@ -174,6 +185,7 @@ local function fireSafeSlot(instant)
   local refs = g.SB_REFS
   if not (refs and refs.set and refs.state and refs.fire) then return end
   if isStunnedOrBound() then return end            -- kein Equip/Cast wenn stunned/bound
+  if legitFail() then return end                   -- Legitness: Cast manchmal verschlucken (Whiff)
   local set, state, fire = refs.set, refs.state, refs.fire
   local u13 = g.SB_MOUSE
   local target = u13 and u13.Hit and u13.Hit.Position
@@ -311,6 +323,12 @@ local function startAim()
   end
   local aimConn = RunService.RenderStepped:Connect(function()
     if not g.SB_AIM then rawset(u13, "Hit", nil); return end
+    -- Legitness: fuer kurze Fenster (~0.2s) den Aim ganz aussetzen -> so viel % der Shots gehen daneben
+    if os.clock() >= (g.SB_LEGIT_AIMNEXT or 0) then
+      g.SB_LEGIT_AIMOFF = legitFail()
+      g.SB_LEGIT_AIMNEXT = os.clock() + 0.2
+    end
+    if g.SB_LEGIT_AIMOFF then rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; return end
     local cam = workspace.CurrentCamera
     local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     if not (cam and myHRP) then rawset(u13, "Hit", nil); return end
@@ -393,6 +411,7 @@ local function hookShield()
     if lp:GetAttribute("ProtegoActive") == true then return end
     local cd = tonumber(lp:GetAttribute("ProtegoCooldownFinishTime"))
     if cd and cd >= workspace:GetServerTimeNow() then return end
+    if legitFail() then return end                            -- Legitness: Schild manchmal nicht poppen
     pcall(function() packets.protego.send() end)
     g.SB_SHIELD_POPS = (tonumber(g.SB_SHIELD_POPS) or 0) + 1
   end)
@@ -443,6 +462,7 @@ local function hookDodge()
       local cd = tonumber(lp:GetAttribute("ProtegoCooldownFinishTime"))
       if not (cd and cd >= workspace:GetServerTimeNow()) then return end -- Schild ready -> uebernimmt
     end
+    if legitFail() then return end                                      -- Legitness: Dodge manchmal auslassen
     -- Ausweichrichtung = 90° zum Spell-Vektor, auf die Seite die uns AUS der Flugbahn zieht
     local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
@@ -535,11 +555,12 @@ local function startClashAuto()
       hit = inArc(ang, Bonus.Rotation, Bonus.Half.Marker.UIStroke.UIGradient.Rotation)
     end
     if hit and armed then
-      armed = false
-      g.SB_CLASH_HITS = (tonumber(g.SB_CLASH_HITS) or 0) + 1
-      -- genau EIN Leertasten-Druck pro Hit (native Input, zuverlaessiger als VIM)
-      pcall(function() keypress(0x20) end)   -- Space DOWN
-      pcall(function() keyrelease(0x20) end)  -- Space UP
+      armed = false                             -- genau EINE Entscheidung pro Arc-Eintritt
+      if not legitFail() then                   -- Legitness: manche Arc-Treffer absichtlich verpassen
+        g.SB_CLASH_HITS = (tonumber(g.SB_CLASH_HITS) or 0) + 1
+        pcall(function() keypress(0x20) end)   -- Space DOWN
+        pcall(function() keyrelease(0x20) end)  -- Space UP
+      end
     elseif not hit then
       armed = true
     end
@@ -923,6 +944,19 @@ local function mountGui()
   hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
   hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Text = "Rechtsklick = Settings.  RShift/B schliesst."
   hint.Parent = util.body
+
+  -- === Client-Panel (globale Optionen) ===
+  local cfg = makePanel("Client", 26 + (PANEL_W + 10) * 2, 40)
+  makeSliderW(cfg.body, 1, "Legitness", 0, 100,
+    function() return tonumber(g.SB_LEGIT) or 0 end,
+    function(v) g.SB_LEGIT = math.floor(v + 0.5) end,
+    function(v) return math.floor(v + 0.5) .. "%" end)
+  local lgh = Instance.new("TextLabel"); lgh.Size = UDim2.new(1, -12, 0, 40); lgh.LayoutOrder = 2
+  lgh.BackgroundTransparency = 1; lgh.Font = Enum.Font.Gotham; lgh.TextSize = 11
+  lgh.TextColor3 = Color3.fromRGB(150, 150, 170); lgh.TextWrapped = true
+  lgh.TextXAlignment = Enum.TextXAlignment.Left
+  lgh.Text = "0% = voller Cheat. Bei X% failt jede Aktion (Aim/Dodge/Shield/Clash/Cast) mit X% Wahrscheinlichkeit."
+  lgh.Parent = cfg.body
 
   -- === ArrayList (oben rechts, immer sichtbar) ===
   local arrayHolder = Instance.new("Frame")
