@@ -6,9 +6,9 @@
 --   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
--- BEDIENUNG: ClickGUI im Future-Style — RechtsShift blendet das Overlay ein/aus.
---   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H/P-Hotkeys entfernt;
---   C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
+-- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
+--   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H-Hotkeys entfernt;
+--   P=Clash, C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
 -- Standalone, per Autoexec ladbar. Cooldown wird durchgehend ueber casts=0 umgangen.
 
 pcall(setthreadidentity, 2)
@@ -443,9 +443,31 @@ local function hookDodge()
       local cd = tonumber(lp:GetAttribute("ProtegoCooldownFinishTime"))
       if not (cd and cd >= workspace:GetServerTimeNow()) then return end -- Schild ready -> uebernimmt
     end
-    -- Mindestabstand zwischen zwei Dodges (kein Ctrl-Gehaemmer bei Burst)
+    -- Ausweichrichtung = 90° zum Spell-Vektor, auf die Seite die uns AUS der Flugbahn zieht
+    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
+    if not (hrp and hum) then return end
+    local me = hrp.Position
+    local dodgeDir
+    local d = pl.direction
+    local dh = d and Vector3.new(d.X, 0, d.Z)
+    if dh and dh.Magnitude > 1e-3 then
+      dh = dh.Unit
+      local perp = Vector3.new(-dh.Z, 0, dh.X)                           -- exakt 90° zum Spell-Vektor
+      if pl.origin then                                                 -- Seite waehlen, die uns wegzieht
+        local foot = pl.origin + dh * (me - pl.origin):Dot(dh)
+        local away = me - foot; away = Vector3.new(away.X, 0, away.Z)
+        if away.Magnitude > 1e-3 and away.Unit:Dot(perp) < 0 then perp = -perp end
+      end
+      dodgeDir = perp
+    elseif pl.target then
+      local away = me - pl.target; away = Vector3.new(away.X, 0, away.Z)
+      if away.Magnitude > 1e-3 then dodgeDir = away.Unit end
+    end
+    if not dodgeDir then return end
+    -- Mindestabstand zwischen zwei Dodges (kein Gehaemmer bei Burst)
     local now = os.clock()
-    if now - (tonumber(g.SB_DODGE_LAST) or 0) < 0.15 then return end
+    if now - (tonumber(g.SB_DODGE_LAST) or 0) < 0.25 then return end
     -- Prozent-Gate (skip-Akkumulator): bei 66.6% -> dodge,dodge,skip,dodge,dodge,skip...
     local pct = tonumber(g.SB_DODGE_PCT) or 100
     if pct <= 0 then return end
@@ -458,11 +480,19 @@ local function hookDodge()
       end
     end
     g.SB_DODGE_LAST = now
-    -- ROLL = LeftControl kurz antippen (Tap < 0.5s). Nativer Input wie manuell.
+    -- ROLL echt via LeftControl-Tap, aber die BEWEGUNGSrichtung senkrecht zum Spell steuern
+    -- (Humanoid:Move) -> die Engine dreht dich (AutoRotate) und rollt dich aus der Flugbahn.
     task.spawn(function()
-      pcall(keypress, 0xA2)     -- LeftControl DOWN (VK_LCONTROL)
+      local endT = os.clock() + 0.4
+      pcall(function() hum:Move(dodgeDir, false) end)                   -- erst senkrecht bewegen...
+      task.wait(0.03)
+      pcall(keypress, 0xA2)                                             -- ...dann ROLL antippen
       task.wait(0.06)
-      pcall(keyrelease, 0xA2)   -- LeftControl UP -> loest ROLL aus
+      pcall(keyrelease, 0xA2)   -- Tap<0.5s -> ROLL nimmt MoveDirection = senkrecht zum Spell
+      while os.clock() < endT do
+        pcall(function() hum:Move(dodgeDir, false) end)                 -- Richtung ueber den Dash halten
+        RunService.Heartbeat:Wait()
+      end
     end)
     g.SB_DODGE_POPS = (tonumber(g.SB_DODGE_POPS) or 0) + 1
   end)
@@ -578,15 +608,16 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
   gui.IgnoreGuiInset = true; gui.DisplayOrder = 9999; gui.Parent = parent
 
-  -- === Theme ===
-  local ACCENT  = Color3.fromRGB(150, 100, 240)
-  local ACCENT2 = Color3.fromRGB(95, 160, 245)
-  local PANEL_BG= Color3.fromRGB(18, 18, 26)
-  local HEAD_BG = Color3.fromRGB(26, 26, 38)
-  local ROW_OFF = Color3.fromRGB(24, 24, 34)
-  local ROW_ON  = Color3.fromRGB(40, 34, 62)
-  local TXT_OFF = Color3.fromRGB(200, 200, 215)
-  local function corner(o, r) local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, r or 6); return c end
+  -- === Theme (Future/Phoebos: teal Header, gruen = an, scharfe Ecken) ===
+  local ACCENT  = Color3.fromRGB(45, 205, 195)    -- teal (Header/Akzent-Balken)
+  local ACCENT2 = Color3.fromRGB(45, 205, 195)
+  local ENABLED = Color3.fromRGB(90, 225, 120)    -- gruen = aktiviertes Modul
+  local PANEL_BG= Color3.fromRGB(12, 12, 15)
+  local HEAD_BG = ACCENT
+  local ROW_OFF = Color3.fromRGB(15, 15, 19)
+  local ROW_ON  = Color3.fromRGB(22, 26, 24)
+  local TXT_OFF = Color3.fromRGB(225, 225, 230)
+  local function corner(o) local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, 0); return c end
 
   local openList                 -- offenes Dropdown (nur eins gleichzeitig)
   local moduleRefs = {}          -- Modul-Zeilen fuer Farb-Refresh
@@ -696,26 +727,24 @@ local function mountGui()
   end
 
   -- === Panel (Kategorie) ===
-  local PANEL_W = 194
+  local PANEL_W = 120
   local function makePanel(title, px, py)
     local panel = Instance.new("Frame")
     panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
     panel.Position = UDim2.fromOffset(px, py); panel.BackgroundColor3 = PANEL_BG
-    panel.BorderSizePixel = 0; panel.Active = true; panel.Parent = clickRoot; corner(panel, 6)
+    panel.BackgroundTransparency = 0.08; panel.BorderSizePixel = 0; panel.Active = true
+    panel.Parent = clickRoot; corner(panel)
     local plist = Instance.new("UIListLayout", panel); plist.SortOrder = Enum.SortOrder.LayoutOrder
     local head = Instance.new("TextLabel")
-    head.Size = UDim2.new(1, 0, 0, 28); head.LayoutOrder = 0; head.BackgroundColor3 = HEAD_BG
-    head.BorderSizePixel = 0; head.Font = Enum.Font.GothamBold; head.TextSize = 14
-    head.TextColor3 = Color3.fromRGB(240, 240, 250); head.TextXAlignment = Enum.TextXAlignment.Left
-    head.Text = "   " .. title; head.Active = true; head.Parent = panel; corner(head, 6)
-    local accent = Instance.new("Frame"); accent.Size = UDim2.new(1, 0, 0, 2)
-    accent.Position = UDim2.new(0, 0, 1, -2); accent.BorderSizePixel = 0; accent.Parent = head
-    local grad = Instance.new("UIGradient", accent); grad.Color = ColorSequence.new(ACCENT, ACCENT2)
+    head.Size = UDim2.new(1, 0, 0, 19); head.LayoutOrder = 0; head.BackgroundColor3 = HEAD_BG
+    head.BorderSizePixel = 0; head.Font = Enum.Font.GothamBold; head.TextSize = 12
+    head.TextColor3 = Color3.fromRGB(12, 22, 22); head.TextXAlignment = Enum.TextXAlignment.Left
+    head.Text = "  " .. title; head.Active = true; head.Parent = panel; corner(head)
     local body = Instance.new("Frame"); body.BackgroundTransparency = 1
     body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
     body.LayoutOrder = 1; body.Parent = panel
     local bl = Instance.new("UIListLayout", body); bl.SortOrder = Enum.SortOrder.LayoutOrder
-    local bp = Instance.new("UIPadding", body); bp.PaddingTop = UDim.new(0, 4); bp.PaddingBottom = UDim.new(0, 6)
+    local bp = Instance.new("UIPadding", body); bp.PaddingTop = UDim.new(0, 1); bp.PaddingBottom = UDim.new(0, 2)
     -- Drag am Header
     local dragging, ds, sp
     head.InputBegan:Connect(function(i)
@@ -762,23 +791,23 @@ local function mountGui()
     panel.ord = panel.ord + 1
     local ord = panel.ord
     local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 26); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
+    row.Size = UDim2.new(1, 0, 0, 18); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
     row.BackgroundColor3 = ROW_OFF; row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
-    row.TextSize = 13; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. name
+    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "  " .. name
     row.TextColor3 = TXT_OFF; row.Parent = panel.body
-    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 3, 1, 0); bar.BorderSizePixel = 0
-    bar.BackgroundColor3 = ACCENT; bar.Visible = false; bar.Parent = row
+    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 2, 1, 0); bar.BorderSizePixel = 0
+    bar.BackgroundColor3 = ENABLED; bar.Visible = false; bar.Parent = row
     local arrow
     if buildSettings then
-      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(22, 26)
-      arrow.Position = UDim2.new(1, -22, 0, 0); arrow.BackgroundTransparency = 1
-      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 15; arrow.TextColor3 = Color3.fromRGB(170, 170, 190)
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(18, 18)
+      arrow.Position = UDim2.new(1, -18, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.TextColor3 = Color3.fromRGB(150, 150, 165)
       arrow.Text = "+"; arrow.Parent = row
     end
     local function paint()
       local on = get()
       row.BackgroundColor3 = on and ROW_ON or ROW_OFF
-      row.TextColor3 = on and Color3.fromRGB(235, 225, 255) or TXT_OFF
+      row.TextColor3 = on and ENABLED or TXT_OFF
       bar.Visible = on
     end
     paint(); moduleRefs[#moduleRefs + 1] = paint
@@ -795,19 +824,19 @@ local function mountGui()
     panel.ord = panel.ord + 1
     local ord = panel.ord
     local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 26); row.LayoutOrder = ord * 10; row.AutoButtonColor = true
-    row.BackgroundColor3 = Color3.fromRGB(30, 30, 44); row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
-    row.TextSize = 13; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. labelFn()
+    row.Size = UDim2.new(1, 0, 0, 18); row.LayoutOrder = ord * 10; row.AutoButtonColor = true
+    row.BackgroundColor3 = Color3.fromRGB(20, 20, 26); row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
+    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "  " .. labelFn()
     row.TextColor3 = Color3.fromRGB(210, 215, 235); row.Parent = panel.body
-    moduleRefs[#moduleRefs + 1] = function() row.Text = "   " .. labelFn() end
+    moduleRefs[#moduleRefs + 1] = function() row.Text = "  " .. labelFn() end
     local arrow
     if buildSettings then
-      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(22, 26)
-      arrow.Position = UDim2.new(1, -22, 0, 0); arrow.BackgroundTransparency = 1
-      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 15; arrow.TextColor3 = Color3.fromRGB(170, 170, 190)
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(18, 18)
+      arrow.Position = UDim2.new(1, -18, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.TextColor3 = Color3.fromRGB(150, 150, 165)
       arrow.Text = "+"; arrow.Parent = row
     end
-    row.MouseButton1Click:Connect(function() onClick(); row.Text = "   " .. labelFn() end)
+    row.MouseButton1Click:Connect(function() onClick(); row.Text = "  " .. labelFn() end)
     if buildSettings then
       local toggle = makeExpander(panel, ord, arrow, buildSettings)
       arrow.MouseButton1Click:Connect(toggle)
@@ -816,7 +845,7 @@ local function mountGui()
   end
 
   -- === Combat-Panel ===
-  local combat = makePanel("Combat", 30, 54)
+  local combat = makePanel("Combat", 26, 40)
   addModule(combat, "Silent-Aim",
     function() return g.SB_AIM end,
     function(v) g.SB_AIM = v; if v then startSelector(); startAim() end end,
@@ -858,7 +887,7 @@ local function mountGui()
     end)
 
   -- === Utility-Panel ===
-  local util = makePanel("Utility", 30 + PANEL_W + 16, 54)
+  local util = makePanel("Utility", 26 + PANEL_W + 10, 40)
   addAction(util, function() return "Apparate \xe2\x86\x92 " .. tostring(g.SB_APPA_TARGET or "-") end,
     function() apparateTo(g.SB_APPA_TARGET) end,
     function(sf)
@@ -877,7 +906,7 @@ local function mountGui()
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
   hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
   hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
-  hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Text = "Rechtsklick auf ein Modul = Settings.  RShift schliesst."
+  hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Text = "Rechtsklick = Settings.  RShift/B schliesst."
   hint.Parent = util.body
 
   -- === ArrayList (oben rechts, immer sichtbar) ===
@@ -919,12 +948,23 @@ local function mountGui()
     end
   end)
 
-  -- RechtsShift = ClickGUI toggle; C/T/G bleiben Aktions-Hotkeys (F/H/P entfernt)
+  -- === Watermark oben links (Future-Style) ===
+  local wm = Instance.new("TextLabel")
+  wm.AnchorPoint = Vector2.new(0, 0); wm.Position = UDim2.fromOffset(8, 5)
+  wm.Size = UDim2.fromOffset(0, 0); wm.AutomaticSize = Enum.AutomaticSize.XY
+  wm.BackgroundTransparency = 1; wm.Font = Enum.Font.GothamBlack; wm.TextSize = 20
+  wm.TextColor3 = ACCENT; wm.Text = "Spellbound"; wm.Parent = gui
+  local wmg = Instance.new("UIGradient", wm)
+  wmg.Color = ColorSequence.new(ACCENT, Color3.fromRGB(120, 90, 220))
+
+  -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
-    if i.KeyCode == Enum.KeyCode.RightShift then setOpen(not guiOpen); return end
+    if i.KeyCode == Enum.KeyCode.RightShift or i.KeyCode == Enum.KeyCode.B then setOpen(not guiOpen); return end
     if gp then return end
     if i.KeyCode == Enum.KeyCode.C then
       g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
+    elseif i.KeyCode == Enum.KeyCode.P then
+      g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
