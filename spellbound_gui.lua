@@ -36,6 +36,7 @@ g.SB_CONNS = {}
 g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
+if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
 if g.SB_AIM_PRED == nil then g.SB_AIM_PRED = true end   -- Vorhalt an/aus
@@ -298,19 +299,29 @@ local function startAim()
     local origin = myHRP.Position
     local speed = g.SB_AIM_PRED and currentSpeed() or 0
     local bestH, bestHum, bestScreen, bestName
+    local function consider(char, name)
+      if not char or (g.SB_AIM_EXEMPT and g.SB_AIM_EXEMPT[name]) then return end
+      local h  = char:FindFirstChild("HumanoidRootPart")
+      local hu = char:FindFirstChildOfClass("Humanoid")
+      if not (h and hu and hu.Health > 0) then return end
+      local sp, onScreen = cam:WorldToViewportPoint(h.Position)
+      if not (onScreen and sp.Z > 0) then return end
+      local sd = (Vector2.new(sp.X, sp.Y) - Vector2.new(mp.X, mp.Y)).Magnitude
+      local wd = (h.Position - origin).Magnitude
+      if sd <= g.SB_AIM_FOV and wd <= g.SB_AIM_RANGE and (not bestScreen or sd < bestScreen) then
+        bestH, bestHum, bestScreen, bestName = h, hu, sd, name
+      end
+    end
     for _, pl in ipairs(Players:GetPlayers()) do
-      if pl ~= lp and pl.Character and not (g.SB_AIM_EXEMPT and g.SB_AIM_EXEMPT[pl.Name]) then
-        local h  = pl.Character:FindFirstChild("HumanoidRootPart")
-        local hu = pl.Character:FindFirstChildOfClass("Humanoid")
-        if h and hu and hu.Health > 0 then
-          local sp, onScreen = cam:WorldToViewportPoint(h.Position)
-          if onScreen and sp.Z > 0 then
-            local sd = (Vector2.new(sp.X, sp.Y) - Vector2.new(mp.X, mp.Y)).Magnitude
-            local wd = (h.Position - origin).Magnitude
-            if sd <= g.SB_AIM_FOV and wd <= g.SB_AIM_RANGE and (not bestScreen or sd < bestScreen) then
-              bestH, bestHum, bestScreen, bestName = h, hu, sd, pl.Name
-            end
-          end
+      if pl ~= lp then consider(pl.Character, pl.Name) end
+    end
+    -- NPCs (Workspace.Terrain.characters) nur wenn NPC-Aim aktiv
+    if g.SB_AIM_NPC then
+      local terr = workspace:FindFirstChild("Terrain")
+      local folder = terr and terr:FindFirstChild("characters")
+      if folder then
+        for _, m in ipairs(folder:GetChildren()) do
+          if m ~= lp.Character and m:IsA("Model") then consider(m, m.Name) end
         end
       end
     end
@@ -478,7 +489,7 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.Parent = parent
 
   local main = Instance.new("Frame")
-  main.Size = UDim2.fromOffset(240, 484)
+  main.Size = UDim2.fromOffset(240, 516)
   main.Position = UDim2.fromScale(0.5, 0.3)
   main.BackgroundColor3 = Color3.fromRGB(24, 22, 34)
   main.BorderSizePixel = 0; main.Active = true; main.Parent = gui
@@ -511,30 +522,31 @@ local function mountGui()
 
   local btnAim   = mkButton(38, 34)   -- SILENT-AIM toggle (F)
   local btnPred  = mkButton(76, 28)   -- Vorhalt / Projektilgeschwindigkeit
-  local btnShield= mkButton(108, 34)  -- AUTO-SHIELD toggle (H)
-  local btnClash = mkButton(146, 34)  -- AUTO-CLASH toggle (P)
-  local btnExempt= mkButton(184, 28)  -- Silent-Aim Ausnahmen (Whitelist)
-  local btnAppa  = mkButton(216, 28)  -- Apparate-Ziel waehlen (TP mit Taste T)
-  local btnAppaGo= mkButton(248, 30)  -- Apparate JETZT (Button + Taste T)
-  local btnSafe  = mkButton(282, 30)  -- SAFE COMBAT toggle (Click-Cast Rotation)
-  local btnRot1  = mkButton(316, 24)  -- Rotation Slot 1
-  local btnRot2  = mkButton(342, 24)  -- Rotation Slot 2
-  local btnRot3  = mkButton(368, 24)  -- Rotation Slot 3
-  local btnRot4  = mkButton(394, 24)  -- Rotation Slot 4
+  local btnNpc   = mkButton(108, 28)  -- Silent-Aim auch auf NPCs
+  local btnShield= mkButton(140, 34)  -- AUTO-SHIELD toggle (H)
+  local btnClash = mkButton(178, 34)  -- AUTO-CLASH toggle (P)
+  local btnExempt= mkButton(216, 28)  -- Silent-Aim Ausnahmen (Whitelist)
+  local btnAppa  = mkButton(248, 28)  -- Apparate-Ziel waehlen (TP mit Taste T)
+  local btnAppaGo= mkButton(280, 30)  -- Apparate JETZT (Button + Taste T)
+  local btnSafe  = mkButton(314, 30)  -- SAFE COMBAT toggle (Click-Cast Rotation)
+  local btnRot1  = mkButton(348, 24)  -- Rotation Slot 1
+  local btnRot2  = mkButton(374, 24)  -- Rotation Slot 2
+  local btnRot3  = mkButton(400, 24)  -- Rotation Slot 3
+  local btnRot4  = mkButton(426, 24)  -- Rotation Slot 4
   local rotBtns  = { btnRot1, btnRot2, btnRot3, btnRot4 }
-  local btnAppaLoad = mkButton(422, 30)  -- appa in die Hand laden (Taste G)
+  local btnAppaLoad = mkButton(454, 30)  -- appa in die Hand laden (Taste G)
 
   local status = Instance.new("TextLabel")
-  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 456)
+  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 488)
   status.BackgroundTransparency = 1; status.Font = Enum.Font.Gotham; status.TextSize = 12
   status.TextColor3 = Color3.fromRGB(170, 160, 200); status.TextXAlignment = Enum.TextXAlignment.Left
   status.Text = "bereit"; status.Parent = main
 
   -- Ein-/Ausklappen (Header bleibt sichtbar; Hotkeys laufen unabhaengig weiter)
   local openList   -- offenes Dropdown (von Spell-/Exempt-/Appa-Listen genutzt)
-  local FULL_H = 484
+  local FULL_H = 516
   local collapsed = false
-  local content = { btnAim, btnPred, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
+  local content = { btnAim, btnPred, btnNpc, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
   local function setCollapsed(v)
     collapsed = v
     for _, c in ipairs(content) do c.Visible = not v end
@@ -564,6 +576,8 @@ local function mountGui()
       btnPred.Text = "Vorhalt: AUS (direkt)"
       btnPred.BackgroundColor3 = Color3.fromRGB(46,42,62)
     end
+    btnNpc.Text = g.SB_AIM_NPC and "NPC-Aim: AN" or "NPC-Aim: AUS"
+    btnNpc.BackgroundColor3 = g.SB_AIM_NPC and Color3.fromRGB(150,90,40) or Color3.fromRGB(46,42,62)
     btnShield.Text = g.SB_SHIELD and "AUTO-SHIELD: AN  [H]" or "AUTO-SHIELD: AUS  [H]"
     btnShield.BackgroundColor3 = g.SB_SHIELD and Color3.fromRGB(56,120,170) or Color3.fromRGB(70,62,96)
     btnClash.Text = g.SB_CLASH and "AUTO-CLASH: AN  [P]" or "AUTO-CLASH: AUS  [P]"
@@ -705,6 +719,10 @@ local function mountGui()
   end)
   btnPred.MouseButton1Click:Connect(function()
     g.SB_AIM_PRED = not g.SB_AIM_PRED
+    render()
+  end)
+  btnNpc.MouseButton1Click:Connect(function()
+    g.SB_AIM_NPC = not g.SB_AIM_NPC
     render()
   end)
   btnShield.MouseButton1Click:Connect(function()
