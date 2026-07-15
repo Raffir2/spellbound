@@ -608,15 +608,16 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
   gui.IgnoreGuiInset = true; gui.DisplayOrder = 9999; gui.Parent = parent
 
-  -- === Theme (Future/Phoebos: teal Header, gruen = an, scharfe Ecken) ===
-  local ACCENT  = Color3.fromRGB(45, 205, 195)    -- teal (Header/Akzent-Balken)
-  local ACCENT2 = Color3.fromRGB(45, 205, 195)
-  local ENABLED = Color3.fromRGB(90, 225, 120)    -- gruen = aktiviertes Modul
-  local PANEL_BG= Color3.fromRGB(12, 12, 15)
+  -- === Theme (Phobos/Future: gruener Header, aktiv = ganz gruen, scharfe Ecken) ===
+  local ACCENT  = Color3.fromRGB(95, 205, 90)     -- Phobos-Gruen (Header + aktives Modul)
+  local ACCENT2 = Color3.fromRGB(95, 205, 90)
+  local ENABLED = Color3.fromRGB(95, 205, 90)
+  local DARKTXT = Color3.fromRGB(10, 16, 10)      -- dunkler Text auf Gruen
+  local PANEL_BG= Color3.fromRGB(10, 11, 14)
   local HEAD_BG = ACCENT
   local ROW_OFF = Color3.fromRGB(15, 15, 19)
-  local ROW_ON  = Color3.fromRGB(22, 26, 24)
-  local TXT_OFF = Color3.fromRGB(225, 225, 230)
+  local ROW_ON  = ACCENT
+  local TXT_OFF = Color3.fromRGB(188, 188, 194)
   local function corner(o) local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, 0); return c end
 
   local openList                 -- offenes Dropdown (nur eins gleichzeitig)
@@ -633,6 +634,12 @@ local function mountGui()
   clickRoot.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
   end)
+  -- Alles laeuft in einem skalierten Host -> min. 3x groesser ueber EINEN Regler
+  local UI_SCALE = 3
+  local panelHost = Instance.new("Frame")
+  panelHost.Size = UDim2.fromScale(1, 1); panelHost.BackgroundTransparency = 1
+  panelHost.BorderSizePixel = 0; panelHost.Parent = clickRoot
+  Instance.new("UIScale", panelHost).Scale = UI_SCALE
 
   -- === Einstellungs-Widgets ===
   local function makeToggleW(parent, ord, label, get, set)
@@ -693,11 +700,13 @@ local function mountGui()
       closeList()
       local items = itemsFn()
       local sf = Instance.new("ScrollingFrame")
-      sf.Size = UDim2.fromOffset(math.max(btn.AbsoluteSize.X, 120), math.min(math.max(#items, 1) * 22, 154))
-      sf.Position = UDim2.fromOffset(btn.AbsolutePosition.X, btn.AbsolutePosition.Y + btn.AbsoluteSize.Y + 2)
-      sf.BackgroundColor3 = Color3.fromRGB(24, 24, 34); sf.BorderSizePixel = 0
+      -- panelHost ist um UI_SCALE skaliert -> in Host-lokalen (unskalierten) Koordinaten setzen
+      local baseW = btn.AbsoluteSize.X / UI_SCALE
+      sf.Size = UDim2.fromOffset(math.max(baseW, 110), math.min(math.max(#items, 1) * 22, 150))
+      sf.Position = UDim2.fromOffset(btn.AbsolutePosition.X / UI_SCALE, (btn.AbsolutePosition.Y + btn.AbsoluteSize.Y) / UI_SCALE + 2)
+      sf.BackgroundColor3 = Color3.fromRGB(18, 18, 22); sf.BorderSizePixel = 0
       sf.ScrollBarThickness = 4; sf.CanvasSize = UDim2.fromOffset(0, #items * 22)
-      sf.ZIndex = 60; sf.Parent = clickRoot; corner(sf, 5)
+      sf.ZIndex = 60; sf.Parent = panelHost; corner(sf)
       local lay = Instance.new("UIListLayout", sf); lay.SortOrder = Enum.SortOrder.LayoutOrder
       for _, name in ipairs(items) do
         local it = Instance.new("TextButton")
@@ -732,14 +741,18 @@ local function mountGui()
     local panel = Instance.new("Frame")
     panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
     panel.Position = UDim2.fromOffset(px, py); panel.BackgroundColor3 = PANEL_BG
-    panel.BackgroundTransparency = 0.08; panel.BorderSizePixel = 0; panel.Active = true
-    panel.Parent = clickRoot; corner(panel)
+    panel.BackgroundTransparency = 0.05; panel.BorderSizePixel = 0; panel.Active = true
+    panel.Parent = panelHost; corner(panel)
     local plist = Instance.new("UIListLayout", panel); plist.SortOrder = Enum.SortOrder.LayoutOrder
     local head = Instance.new("TextLabel")
     head.Size = UDim2.new(1, 0, 0, 19); head.LayoutOrder = 0; head.BackgroundColor3 = HEAD_BG
     head.BorderSizePixel = 0; head.Font = Enum.Font.GothamBold; head.TextSize = 12
-    head.TextColor3 = Color3.fromRGB(12, 22, 22); head.TextXAlignment = Enum.TextXAlignment.Left
+    head.TextColor3 = DARKTXT; head.TextXAlignment = Enum.TextXAlignment.Left
     head.Text = "  " .. title; head.Active = true; head.Parent = panel; corner(head)
+    local hmark = Instance.new("TextLabel"); hmark.Size = UDim2.fromOffset(16, 19)
+    hmark.Position = UDim2.new(1, -16, 0, 0); hmark.BackgroundTransparency = 1
+    hmark.Font = Enum.Font.GothamBold; hmark.TextSize = 12; hmark.TextColor3 = DARKTXT
+    hmark.Text = "-"; hmark.Parent = head
     local body = Instance.new("Frame"); body.BackgroundTransparency = 1
     body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
     body.LayoutOrder = 1; body.Parent = panel
@@ -795,20 +808,22 @@ local function mountGui()
     row.BackgroundColor3 = ROW_OFF; row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
     row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "  " .. name
     row.TextColor3 = TXT_OFF; row.Parent = panel.body
-    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 2, 1, 0); bar.BorderSizePixel = 0
-    bar.BackgroundColor3 = ENABLED; bar.Visible = false; bar.Parent = row
+    local dot = Instance.new("Frame"); dot.Size = UDim2.fromOffset(8, 8)
+    dot.Position = UDim2.new(1, (buildSettings and -26 or -12), 0.5, -4)
+    dot.BorderSizePixel = 0; dot.Parent = row
+    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
     local arrow
     if buildSettings then
-      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(18, 18)
-      arrow.Position = UDim2.new(1, -18, 0, 0); arrow.BackgroundTransparency = 1
-      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.TextColor3 = Color3.fromRGB(150, 150, 165)
-      arrow.Text = "+"; arrow.Parent = row
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(16, 18)
+      arrow.Position = UDim2.new(1, -16, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.Text = "+"; arrow.Parent = row
     end
     local function paint()
       local on = get()
       row.BackgroundColor3 = on and ROW_ON or ROW_OFF
-      row.TextColor3 = on and ENABLED or TXT_OFF
-      bar.Visible = on
+      row.TextColor3 = on and DARKTXT or TXT_OFF
+      dot.BackgroundColor3 = on and DARKTXT or Color3.fromRGB(70, 70, 78)
+      if arrow then arrow.TextColor3 = on and DARKTXT or Color3.fromRGB(140, 140, 150) end
     end
     paint(); moduleRefs[#moduleRefs + 1] = paint
     row.MouseButton1Click:Connect(function() set(not get()); paint() end)
@@ -930,11 +945,11 @@ local function mountGui()
     table.sort(on, function(a, b) return #a > #b end)
     for idx, nm in ipairs(on) do
       local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
-      t.Size = UDim2.fromOffset(0, 18); t.LayoutOrder = idx
-      t.BackgroundColor3 = Color3.fromRGB(16, 16, 24); t.BackgroundTransparency = 0.15
-      t.Font = Enum.Font.GothamBold; t.TextSize = 13; t.TextColor3 = Color3.fromRGB(240, 240, 250)
+      t.Size = UDim2.fromOffset(0, 26); t.LayoutOrder = idx
+      t.BackgroundColor3 = Color3.fromRGB(12, 13, 16); t.BackgroundTransparency = 0.1
+      t.Font = Enum.Font.GothamBold; t.TextSize = 18; t.TextColor3 = Color3.fromRGB(240, 245, 240)
       t.Text = "  " .. nm .. "  "; t.Parent = arrayHolder
-      local b = Instance.new("Frame"); b.Size = UDim2.new(0, 2, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
+      local b = Instance.new("Frame"); b.Size = UDim2.new(0, 3, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
       b.BorderSizePixel = 0; b.BackgroundColor3 = ACCENT; b.Parent = t
     end
   end
@@ -950,9 +965,9 @@ local function mountGui()
 
   -- === Watermark oben links (Future-Style) ===
   local wm = Instance.new("TextLabel")
-  wm.AnchorPoint = Vector2.new(0, 0); wm.Position = UDim2.fromOffset(8, 5)
+  wm.AnchorPoint = Vector2.new(0, 0); wm.Position = UDim2.fromOffset(10, 6)
   wm.Size = UDim2.fromOffset(0, 0); wm.AutomaticSize = Enum.AutomaticSize.XY
-  wm.BackgroundTransparency = 1; wm.Font = Enum.Font.GothamBlack; wm.TextSize = 20
+  wm.BackgroundTransparency = 1; wm.Font = Enum.Font.GothamBlack; wm.TextSize = 34
   wm.TextColor3 = ACCENT; wm.Text = "Spellbound"; wm.Parent = gui
   local wmg = Instance.new("UIGradient", wm)
   wmg.Color = ColorSequence.new(ACCENT, Color3.fromRGB(120, 90, 220))
