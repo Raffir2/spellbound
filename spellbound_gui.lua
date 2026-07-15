@@ -740,7 +740,7 @@ local function mountGui()
     end)
   end
 
-  -- Inline-Spielerliste (z.B. Aim-Ausnahmen): Haekchen pro Spieler
+  -- Inline-Spielerliste (z.B. Aim-Ausnahmen): scrollbare Haekchen pro Spieler
   local function makePlayerToggles(parent, ord, isOn, onToggle)
     local others = {}
     for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
@@ -751,8 +751,17 @@ local function mountGui()
       none.TextSize = 11; none.TextColor3 = Color3.fromRGB(150, 150, 165)
       none.Text = "keine anderen Spieler"; none.Parent = parent; return
     end
+    -- Scrollbarer Container: max MAXROWS Zeilen sichtbar, der Rest wird gescrollt
+    local ROW, MAXROWS = 22, 6
+    local box = Instance.new("ScrollingFrame")
+    box.Size = UDim2.new(1, 0, 0, math.min(#others, MAXROWS) * ROW)
+    box.LayoutOrder = ord; box.BackgroundTransparency = 1; box.BorderSizePixel = 0
+    box.ScrollBarThickness = 4; box.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
+    box.CanvasSize = UDim2.fromOffset(0, #others * ROW)
+    box.ScrollingDirection = Enum.ScrollingDirection.Y; box.Parent = parent
+    local lay = Instance.new("UIListLayout", box); lay.SortOrder = Enum.SortOrder.LayoutOrder
     for idx, pl in ipairs(others) do
-      makeToggleW(parent, ord + idx, pl.Name, function() return isOn(pl.Name) end, function() onToggle(pl.Name) end)
+      makeToggleW(box, idx, pl.Name, function() return isOn(pl.Name) end, function() onToggle(pl.Name) end)
     end
   end
 
