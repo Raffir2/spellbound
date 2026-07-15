@@ -191,11 +191,25 @@ local function fireSafeSlot(instant)
   g.SB_ROT_IDX = (idx % #ROT) + 1                  -- IMMER weiterrotieren (kein Haengenbleiben)
 end
 
+-- ECHTE Mausposition per Kamera-Raycast (unabhaengig vom Silent-Aim-Override auf u13.Hit).
+-- Appa soll NIE auto/silent-aimen -> immer dorthin wo der Cursor wirklich zeigt.
+local function realMouseHit()
+  local cam = workspace.CurrentCamera
+  if not cam then return nil end
+  local ml = UIS:GetMouseLocation()
+  local ray = cam:ScreenPointToRay(ml.X, ml.Y)
+  local params = RaycastParams.new()
+  params.FilterType = Enum.RaycastFilterType.Exclude
+  params.FilterDescendantsInstances = { lp.Character }
+  local res = workspace:Raycast(ray.Origin, ray.Direction * 5000, params)
+  if res then return res.Position end
+  return ray.Origin + ray.Direction * 300         -- Fallback: Punkt entlang des Strahls
+end
+
 -- Ein Klick = aktuellen Spell casten (vorgeladen -> sofort, sonst load+wait)
 local function castCurrent()
   if g.SB_APPA_PENDING then                        -- appa hat Vorrang, danach NICHTS nachladen
-    local u13 = g.SB_MOUSE
-    castApparToPos(u13 and u13.Hit and u13.Hit.Position)
+    castApparToPos(realMouseHit())                 -- echte Maus, kein Silent-Aim
     g.SB_APPA_PENDING = false; g.SB_LAST_CAST = os.clock(); return
   end
   if not g.SB_SAFE then return end
