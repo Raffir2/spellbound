@@ -635,7 +635,7 @@ local function mountGui()
     if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
   end)
   -- Alles laeuft in einem skalierten Host -> min. 3x groesser ueber EINEN Regler
-  local UI_SCALE = 3
+  local UI_SCALE = 2.3
   local panelHost = Instance.new("Frame")
   panelHost.Size = UDim2.fromScale(1, 1); panelHost.BackgroundTransparency = 1
   panelHost.BorderSizePixel = 0; panelHost.Parent = clickRoot
