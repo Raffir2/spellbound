@@ -3,10 +3,12 @@
 --       Spell -> jeder deiner Klicks feuert ihn ohne Cooldown (echte Hits). Auswaehlbar.
 --   COMBO: nach JEDEM Auto-Spell-Fire wird einmal der gewaehlte Combo-Spell equippt
 --       + gecastet, danach sofort wieder der Auto-Spell scharf. Toggle + auswaehlbar.
---   SILENT-AIM (F): lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
---   AUTO-SHIELD (H): reaktives Protego gegen eingehende Casts.
---   AUTO-CLASH (P): gewinnt das Clash-Minigame automatisch — drueckt Space exakt
---       wenn der Pointer in den Goal-/Bonus-Arc eintritt (echter Input, kein Miss-Stun).
+--   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
+--   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
+--   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
+-- BEDIENUNG: ClickGUI im Future-Style — RechtsShift blendet das Overlay ein/aus.
+--   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H/P-Hotkeys entfernt;
+--   C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
 -- Standalone, per Autoexec ladbar. Cooldown wird durchgehend ueber casts=0 umgangen.
 
 pcall(setthreadidentity, 2)
@@ -562,7 +564,7 @@ local function getSpellList()
   return list
 end
 
---========================= GUI =========================--
+--================= GUI (ClickGUI im Future-Style, RechtsShift oeffnet) =================--
 local function mountGui()
   local parent
   local ok, h = pcall(function() return gethui and gethui() end)
@@ -573,359 +575,363 @@ local function mountGui()
 
   local gui = Instance.new("ScreenGui")
   gui.Name = "SpellboundGUI"; gui.ResetOnSpawn = false
-  gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.Parent = parent
+  gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+  gui.IgnoreGuiInset = true; gui.DisplayOrder = 9999; gui.Parent = parent
 
-  local main = Instance.new("Frame")
-  main.Size = UDim2.fromOffset(240, 574)
-  main.Position = UDim2.fromScale(0.5, 0.3)
-  main.BackgroundColor3 = Color3.fromRGB(24, 22, 34)
-  main.BorderSizePixel = 0; main.Active = true; main.Parent = gui
-  Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
-  local stroke = Instance.new("UIStroke", main); stroke.Color = Color3.fromRGB(120, 90, 200); stroke.Thickness = 1.4
+  -- === Theme ===
+  local ACCENT  = Color3.fromRGB(150, 100, 240)
+  local ACCENT2 = Color3.fromRGB(95, 160, 245)
+  local PANEL_BG= Color3.fromRGB(18, 18, 26)
+  local HEAD_BG = Color3.fromRGB(26, 26, 38)
+  local ROW_OFF = Color3.fromRGB(24, 24, 34)
+  local ROW_ON  = Color3.fromRGB(40, 34, 62)
+  local TXT_OFF = Color3.fromRGB(200, 200, 215)
+  local function corner(o, r) local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, r or 6); return c end
 
-  local header = Instance.new("TextLabel")
-  header.Size = UDim2.new(1, 0, 0, 30); header.BackgroundColor3 = Color3.fromRGB(46, 38, 74)
-  header.BorderSizePixel = 0; header.Text = "  \xe2\x9c\xa6 Spellbound"; header.TextColor3 = Color3.fromRGB(220, 210, 255)
-  header.Font = Enum.Font.GothamBold; header.TextSize = 15; header.TextXAlignment = Enum.TextXAlignment.Left
-  header.Parent = main
-  Instance.new("UICorner", header).CornerRadius = UDim.new(0, 8)
+  local openList                 -- offenes Dropdown (nur eins gleichzeitig)
+  local moduleRefs = {}          -- Modul-Zeilen fuer Farb-Refresh
+  local function closeList() if openList then openList:Destroy(); openList = nil end end
 
-  local collapseBtn = Instance.new("TextButton")
-  collapseBtn.Size = UDim2.fromOffset(26, 22); collapseBtn.Position = UDim2.new(1, -32, 0, 4)
-  collapseBtn.BackgroundColor3 = Color3.fromRGB(80, 66, 120); collapseBtn.BorderSizePixel = 0
-  collapseBtn.Font = Enum.Font.GothamBold; collapseBtn.TextSize = 18
-  collapseBtn.TextColor3 = Color3.fromRGB(230, 220, 255); collapseBtn.AutoButtonColor = true
-  collapseBtn.Text = "\xe2\x80\x93"; collapseBtn.ZIndex = 3; collapseBtn.Parent = header
-  Instance.new("UICorner", collapseBtn).CornerRadius = UDim.new(0, 4)
+  -- === Dim-Overlay (ClickGUI-Wurzel, per RechtsShift ein/aus) ===
+  local clickRoot = Instance.new("Frame")
+  clickRoot.Size = UDim2.fromScale(1, 1); clickRoot.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+  clickRoot.BackgroundTransparency = 0.4; clickRoot.BorderSizePixel = 0
+  clickRoot.Active = true; clickRoot.Visible = false; clickRoot.Parent = gui
+  local guiOpen = false
+  local function setOpen(v) guiOpen = v; clickRoot.Visible = v; if not v then closeList() end end
+  clickRoot.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
+  end)
 
-  local function mkButton(y, h2)
-    local b = Instance.new("TextButton")
-    b.Size = UDim2.new(1, -20, 0, h2 or 34); b.Position = UDim2.fromOffset(10, y)
-    b.BorderSizePixel = 0; b.Font = Enum.Font.GothamBold; b.TextSize = 14
-    b.TextColor3 = Color3.fromRGB(255, 255, 255); b.AutoButtonColor = true; b.Parent = main
-    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
-    return b
+  -- === Einstellungs-Widgets ===
+  local function makeToggleW(parent, ord, label, get, set)
+    local r = Instance.new("TextButton")
+    r.Size = UDim2.new(1, -12, 0, 22); r.LayoutOrder = ord; r.AutoButtonColor = false
+    r.BackgroundColor3 = Color3.fromRGB(28, 28, 40); r.BorderSizePixel = 0
+    r.Font = Enum.Font.Gotham; r.TextSize = 12; r.TextXAlignment = Enum.TextXAlignment.Left
+    r.Text = "  " .. label; r.TextColor3 = TXT_OFF; r.Parent = parent; corner(r, 4)
+    local box = Instance.new("Frame"); box.Size = UDim2.fromOffset(14, 14)
+    box.Position = UDim2.new(1, -20, 0.5, -7); box.BorderSizePixel = 0; box.Parent = r; corner(box, 3)
+    local function paint() box.BackgroundColor3 = get() and ACCENT or Color3.fromRGB(60, 60, 78) end
+    paint()
+    r.MouseButton1Click:Connect(function() set(not get()); paint() end)
   end
 
-  local btnAim   = mkButton(38, 34)   -- SILENT-AIM toggle (F)
-  local btnPred  = mkButton(76, 28)   -- Vorhalt / Projektilgeschwindigkeit
-  local btnNpc   = mkButton(108, 28)  -- Silent-Aim auch auf NPCs
-  local btnShield= mkButton(140, 34)  -- AUTO-SHIELD toggle (H)
-  local btnClash = mkButton(178, 34)  -- AUTO-CLASH toggle (P)
-  local btnExempt= mkButton(216, 28)  -- Silent-Aim Ausnahmen (Whitelist)
-  local btnAppa  = mkButton(248, 28)  -- Apparate-Ziel waehlen (TP mit Taste T)
-  local btnAppaGo= mkButton(280, 30)  -- Apparate JETZT (Button + Taste T)
-  local btnSafe  = mkButton(314, 30)  -- SAFE COMBAT toggle (Click-Cast Rotation)
-  local btnRot1  = mkButton(348, 24)  -- Rotation Slot 1
-  local btnRot2  = mkButton(374, 24)  -- Rotation Slot 2
-  local btnRot3  = mkButton(400, 24)  -- Rotation Slot 3
-  local btnRot4  = mkButton(426, 24)  -- Rotation Slot 4
-  local rotBtns  = { btnRot1, btnRot2, btnRot3, btnRot4 }
-  local btnAppaLoad = mkButton(454, 30)  -- appa in die Hand laden (Taste G)
-  local btnDodge = mkButton(488, 30)     -- AUTO-DODGE toggle (C)
-
-  -- Dodge-Rate Slider (Prozent, ziehbar)
-  local sliderTrack = Instance.new("Frame")
-  sliderTrack.Size = UDim2.new(1, -20, 0, 18); sliderTrack.Position = UDim2.fromOffset(10, 522)
-  sliderTrack.BackgroundColor3 = Color3.fromRGB(40, 36, 58); sliderTrack.BorderSizePixel = 0
-  sliderTrack.Active = true; sliderTrack.Parent = main
-  Instance.new("UICorner", sliderTrack).CornerRadius = UDim.new(0, 5)
-  local sliderFill = Instance.new("Frame")
-  sliderFill.Size = UDim2.new(1, 0, 1, 0); sliderFill.BackgroundColor3 = Color3.fromRGB(170, 120, 50)
-  sliderFill.BorderSizePixel = 0; sliderFill.Parent = sliderTrack
-  Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(0, 5)
-  local sliderText = Instance.new("TextLabel")
-  sliderText.Size = UDim2.new(1, 0, 1, 0); sliderText.BackgroundTransparency = 1
-  sliderText.Font = Enum.Font.GothamBold; sliderText.TextSize = 12
-  sliderText.TextColor3 = Color3.fromRGB(255, 255, 255); sliderText.ZIndex = 2
-  sliderText.Text = "Dodge-Rate"; sliderText.Parent = sliderTrack
-
-  local status = Instance.new("TextLabel")
-  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 548)
-  status.BackgroundTransparency = 1; status.Font = Enum.Font.Gotham; status.TextSize = 12
-  status.TextColor3 = Color3.fromRGB(170, 160, 200); status.TextXAlignment = Enum.TextXAlignment.Left
-  status.Text = "bereit"; status.Parent = main
-
-  -- Ein-/Ausklappen (Header bleibt sichtbar; Hotkeys laufen unabhaengig weiter)
-  local openList   -- offenes Dropdown (von Spell-/Exempt-/Appa-Listen genutzt)
-  local FULL_H = 574
-  local collapsed = false
-  local content = { btnAim, btnPred, btnNpc, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, btnDodge, sliderTrack, status }
-  local function setCollapsed(v)
-    collapsed = v
-    for _, c in ipairs(content) do c.Visible = not v end
-    if v and openList then openList:Destroy(); openList = nil end
-    main.Size = UDim2.fromOffset(240, v and 30 or FULL_H)
-    collapseBtn.Text = v and "+" or "\xe2\x80\x93"
-  end
-  collapseBtn.MouseButton1Click:Connect(function() setCollapsed(not collapsed) end)
-
-  btnExempt.BackgroundColor3 = Color3.fromRGB(40, 36, 58)
-  btnAppa.BackgroundColor3   = Color3.fromRGB(40, 36, 58)
-  for _, rb in ipairs(rotBtns) do rb.BackgroundColor3 = Color3.fromRGB(34, 44, 40); rb.TextSize = 12 end
-
-  btnPred.BackgroundColor3 = Color3.fromRGB(40, 36, 58)
-  local function render()
-    btnAim.Text = g.SB_AIM and "SILENT-AIM: AN  [F]" or "SILENT-AIM: AUS  [F]"
-    btnAim.BackgroundColor3 = g.SB_AIM and Color3.fromRGB(200,130,40) or Color3.fromRGB(70,62,96)
-    if g.SB_AIM_PRED then
-      local det = tonumber(g.SB_AIM_DETECTED) or 0
-      if det > 0 then
-        btnPred.Text = "Vorhalt: AN  (" .. tostring(g.SB_AIM_DETSPELL) .. " " .. det .. ")"
-      else
-        btnPred.Text = "Vorhalt: AN  (auto-Speed)"
+  local function makeSliderW(parent, ord, label, mn, mx, get, set, fmt)
+    local holder = Instance.new("Frame"); holder.Size = UDim2.new(1, -12, 0, 34)
+    holder.LayoutOrder = ord; holder.BackgroundTransparency = 1; holder.Parent = parent
+    local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1, 0, 0, 16)
+    lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.Gotham; lbl.TextSize = 12
+    lbl.TextColor3 = Color3.fromRGB(210, 210, 225); lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = holder
+    local track = Instance.new("Frame"); track.Size = UDim2.new(1, 0, 0, 8)
+    track.Position = UDim2.fromOffset(0, 20); track.BackgroundColor3 = Color3.fromRGB(44, 44, 60)
+    track.BorderSizePixel = 0; track.Active = true; track.Parent = holder; corner(track, 4)
+    local fill = Instance.new("Frame"); fill.BackgroundColor3 = ACCENT; fill.BorderSizePixel = 0
+    fill.Parent = track; corner(fill, 4)
+    local function upd()
+      lbl.Text = label .. ": " .. fmt(get())
+      fill.Size = UDim2.new(math.clamp((get() - mn) / (mx - mn), 0, 1), 0, 1, 0)
+    end
+    upd()
+    local dragging = false
+    local function setFrom(px)
+      local rel = math.clamp((px - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
+      set(mn + rel * (mx - mn)); upd()
+    end
+    track.InputBegan:Connect(function(i)
+      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; setFrom(i.Position.X)
       end
-      btnPred.BackgroundColor3 = Color3.fromRGB(60,90,110)
-    else
-      btnPred.Text = "Vorhalt: AUS (direkt)"
-      btnPred.BackgroundColor3 = Color3.fromRGB(46,42,62)
-    end
-    btnNpc.Text = g.SB_AIM_NPC and "NPC-Aim: AN" or "NPC-Aim: AUS"
-    btnNpc.BackgroundColor3 = g.SB_AIM_NPC and Color3.fromRGB(150,90,40) or Color3.fromRGB(46,42,62)
-    btnShield.Text = g.SB_SHIELD and "AUTO-SHIELD: AN  [H]" or "AUTO-SHIELD: AUS  [H]"
-    btnShield.BackgroundColor3 = g.SB_SHIELD and Color3.fromRGB(56,120,170) or Color3.fromRGB(70,62,96)
-    btnClash.Text = g.SB_CLASH and "AUTO-CLASH: AN  [P]" or "AUTO-CLASH: AUS  [P]"
-    btnClash.BackgroundColor3 = g.SB_CLASH and Color3.fromRGB(150,60,150) or Color3.fromRGB(70,62,96)
-    local ne = 0; for _ in pairs(g.SB_AIM_EXEMPT) do ne = ne + 1 end
-    btnExempt.Text = "Aim-Ausnahmen: " .. ne .. "  \xe2\x96\xbc"
-    btnAppa.Text = "Appa-Ziel: " .. tostring(g.SB_APPA_TARGET or "-") .. "  \xe2\x96\xbc"
-    btnAppaGo.Text = "\xe2\x86\x92 APPARATE  [T]"
-    btnAppaGo.BackgroundColor3 = Color3.fromRGB(60, 120, 150)
-    btnSafe.Text = g.SB_SAFE and "SAFE COMBAT: AN" or "SAFE COMBAT: AUS"
-    btnSafe.BackgroundColor3 = g.SB_SAFE and Color3.fromRGB(56,150,78) or Color3.fromRGB(70,62,96)
-    for i, rb in ipairs(rotBtns) do
-      rb.Text = i .. ": " .. tostring(g.SB_SAFE_ROT[i]) .. "  \xe2\x96\xbc"
-    end
-    btnAppaLoad.Text = g.SB_APPA_PENDING and "APPA GELADEN - jetzt casten!" or "APPA LADEN  [G]"
-    btnAppaLoad.BackgroundColor3 = g.SB_APPA_PENDING and Color3.fromRGB(150,110,40) or Color3.fromRGB(60,120,150)
-    btnDodge.Text = g.SB_DODGE and "AUTO-DODGE: AN  [C]" or "AUTO-DODGE: AUS  [C]"
-    btnDodge.BackgroundColor3 = g.SB_DODGE and Color3.fromRGB(170,120,50) or Color3.fromRGB(70,62,96)
-    local dp = tonumber(g.SB_DODGE_PCT) or 100
-    sliderText.Text = string.format("Dodge-Rate: %.1f%%", dp)
-    sliderFill.Size = UDim2.new(math.clamp(dp/100, 0, 1), 0, 1, 0)
+    end)
+    table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
+      if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then setFrom(i.Position.X) end
+    end))
+    table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
+      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end))
   end
 
-  -- Dropdown (scrollbare Liste ueber dem Button)
-  local function makeDropdown(ddBtn, setter)
-    ddBtn.MouseButton1Click:Connect(function()
-      if openList then openList:Destroy(); openList = nil end
-      local list = getSpellList()
+  local function makeDropdownW(parent, ord, labelFn, itemsFn, onPick)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -12, 0, 22); btn.LayoutOrder = ord; btn.AutoButtonColor = false
+    btn.BackgroundColor3 = Color3.fromRGB(34, 30, 50); btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.Gotham; btn.TextSize = 12; btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.TextColor3 = Color3.fromRGB(215, 210, 235); btn.Text = "  " .. labelFn(); btn.Parent = parent; corner(btn, 4)
+    btn.MouseButton1Click:Connect(function()
+      closeList()
+      local items = itemsFn()
       local sf = Instance.new("ScrollingFrame")
-      sf.Size = UDim2.fromOffset(ddBtn.AbsoluteSize.X, 160)
-      sf.Position = UDim2.fromOffset(ddBtn.AbsolutePosition.X, ddBtn.AbsolutePosition.Y + ddBtn.AbsoluteSize.Y + 2)
-      sf.BackgroundColor3 = Color3.fromRGB(30, 27, 44); sf.BorderSizePixel = 0
-      sf.ScrollBarThickness = 5; sf.CanvasSize = UDim2.fromOffset(0, #list * 24)
-      sf.ZIndex = 20; sf.Parent = gui
-      Instance.new("UICorner", sf).CornerRadius = UDim.new(0, 6)
+      sf.Size = UDim2.fromOffset(math.max(btn.AbsoluteSize.X, 120), math.min(math.max(#items, 1) * 22, 154))
+      sf.Position = UDim2.fromOffset(btn.AbsolutePosition.X, btn.AbsolutePosition.Y + btn.AbsoluteSize.Y + 2)
+      sf.BackgroundColor3 = Color3.fromRGB(24, 24, 34); sf.BorderSizePixel = 0
+      sf.ScrollBarThickness = 4; sf.CanvasSize = UDim2.fromOffset(0, #items * 22)
+      sf.ZIndex = 60; sf.Parent = clickRoot; corner(sf, 5)
       local lay = Instance.new("UIListLayout", sf); lay.SortOrder = Enum.SortOrder.LayoutOrder
-      for _, name in ipairs(list) do
+      for _, name in ipairs(items) do
         local it = Instance.new("TextButton")
-        it.Size = UDim2.new(1, 0, 0, 24); it.BackgroundColor3 = Color3.fromRGB(38, 34, 54)
+        it.Size = UDim2.new(1, 0, 0, 22); it.BackgroundColor3 = Color3.fromRGB(32, 32, 46)
         it.BorderSizePixel = 0; it.Font = Enum.Font.Gotham; it.TextSize = 12
-        it.TextColor3 = Color3.fromRGB(220, 214, 240); it.Text = name; it.ZIndex = 21; it.Parent = sf
-        it.MouseButton1Click:Connect(function()
-          setter(name); render()
-          if openList then openList:Destroy(); openList = nil end
-        end)
+        it.TextColor3 = Color3.fromRGB(220, 214, 240); it.Text = name; it.ZIndex = 61; it.Parent = sf
+        it.MouseButton1Click:Connect(function() onPick(name); btn.Text = "  " .. labelFn(); closeList() end)
       end
       openList = sf
     end)
   end
-  for i, rb in ipairs(rotBtns) do
-    makeDropdown(rb, function(n) g.SB_SAFE_ROT[i] = n end)
-  end
 
-  -- Spieler-Liste: Klick schaltet Aim-Ausnahme fuer den Spieler um (Haekchen = ausgenommen)
-  btnExempt.MouseButton1Click:Connect(function()
-    -- Toggle: war die Ausnahmeliste offen -> zuklappen und raus
-    if openList then
-      local wasExempt = openList:GetAttribute("isExempt") == true
-      openList:Destroy(); openList = nil
-      if wasExempt then return end
-    end
-    local sf = Instance.new("ScrollingFrame")
-    sf:SetAttribute("isExempt", true)
-    sf.Size = UDim2.fromOffset(btnExempt.AbsoluteSize.X, 170)
-    sf.Position = UDim2.fromOffset(btnExempt.AbsolutePosition.X, btnExempt.AbsolutePosition.Y - 172)
-    sf.BackgroundColor3 = Color3.fromRGB(30, 27, 44); sf.BorderSizePixel = 0
-    sf.ScrollBarThickness = 5; sf.ZIndex = 20; sf.Parent = gui
-    Instance.new("UICorner", sf).CornerRadius = UDim.new(0, 6)
-    local lay = Instance.new("UIListLayout", sf); lay.SortOrder = Enum.SortOrder.LayoutOrder
+  -- Inline-Spielerliste (z.B. Aim-Ausnahmen): Haekchen pro Spieler
+  local function makePlayerToggles(parent, ord, isOn, onToggle)
     local others = {}
     for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
     table.sort(others, function(a, b) return a.Name:lower() < b.Name:lower() end)
-    sf.CanvasSize = UDim2.fromOffset(0, #others * 24)
-    for _, pl in ipairs(others) do
-      local it = Instance.new("TextButton")
-      it.Size = UDim2.new(1, 0, 0, 24); it.BorderSizePixel = 0
-      it.Font = Enum.Font.Gotham; it.TextSize = 12; it.ZIndex = 21; it.Parent = sf
-      local function paint()
-        local ex = g.SB_AIM_EXEMPT[pl.Name] == true
-        it.Text = (ex and "\xe2\x9c\x93 " or "   ") .. pl.Name
-        it.BackgroundColor3 = ex and Color3.fromRGB(56, 110, 70) or Color3.fromRGB(38, 34, 54)
-        it.TextColor3 = ex and Color3.fromRGB(210, 255, 220) or Color3.fromRGB(220, 214, 240)
+    if #others == 0 then
+      local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -12, 0, 18)
+      none.LayoutOrder = ord; none.BackgroundTransparency = 1; none.Font = Enum.Font.Gotham
+      none.TextSize = 11; none.TextColor3 = Color3.fromRGB(150, 150, 165)
+      none.Text = "keine anderen Spieler"; none.Parent = parent; return
+    end
+    for idx, pl in ipairs(others) do
+      makeToggleW(parent, ord + idx, pl.Name, function() return isOn(pl.Name) end, function() onToggle(pl.Name) end)
+    end
+  end
+
+  -- === Panel (Kategorie) ===
+  local PANEL_W = 194
+  local function makePanel(title, px, py)
+    local panel = Instance.new("Frame")
+    panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
+    panel.Position = UDim2.fromOffset(px, py); panel.BackgroundColor3 = PANEL_BG
+    panel.BorderSizePixel = 0; panel.Active = true; panel.Parent = clickRoot; corner(panel, 6)
+    local plist = Instance.new("UIListLayout", panel); plist.SortOrder = Enum.SortOrder.LayoutOrder
+    local head = Instance.new("TextLabel")
+    head.Size = UDim2.new(1, 0, 0, 28); head.LayoutOrder = 0; head.BackgroundColor3 = HEAD_BG
+    head.BorderSizePixel = 0; head.Font = Enum.Font.GothamBold; head.TextSize = 14
+    head.TextColor3 = Color3.fromRGB(240, 240, 250); head.TextXAlignment = Enum.TextXAlignment.Left
+    head.Text = "   " .. title; head.Active = true; head.Parent = panel; corner(head, 6)
+    local accent = Instance.new("Frame"); accent.Size = UDim2.new(1, 0, 0, 2)
+    accent.Position = UDim2.new(0, 0, 1, -2); accent.BorderSizePixel = 0; accent.Parent = head
+    local grad = Instance.new("UIGradient", accent); grad.Color = ColorSequence.new(ACCENT, ACCENT2)
+    local body = Instance.new("Frame"); body.BackgroundTransparency = 1
+    body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
+    body.LayoutOrder = 1; body.Parent = panel
+    local bl = Instance.new("UIListLayout", body); bl.SortOrder = Enum.SortOrder.LayoutOrder
+    local bp = Instance.new("UIPadding", body); bp.PaddingTop = UDim.new(0, 4); bp.PaddingBottom = UDim.new(0, 6)
+    -- Drag am Header
+    local dragging, ds, sp
+    head.InputBegan:Connect(function(i)
+      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; ds = i.Position; sp = panel.Position
       end
-      paint()
-      it.MouseButton1Click:Connect(function()
-        if g.SB_AIM_EXEMPT[pl.Name] then g.SB_AIM_EXEMPT[pl.Name] = nil else g.SB_AIM_EXEMPT[pl.Name] = true end
-        paint(); render()
-      end)
-    end
-    openList = sf
-  end)
-
-  -- Appa-Ziel waehlen (Einzelauswahl, einklappbar)
-  btnAppa.MouseButton1Click:Connect(function()
-    if openList then
-      local wasAppa = openList:GetAttribute("isAppa") == true
-      openList:Destroy(); openList = nil
-      if wasAppa then return end
-    end
-    local sf = Instance.new("ScrollingFrame")
-    sf:SetAttribute("isAppa", true)
-    sf.Size = UDim2.fromOffset(btnAppa.AbsoluteSize.X, 170)
-    sf.Position = UDim2.fromOffset(btnAppa.AbsolutePosition.X, btnAppa.AbsolutePosition.Y - 172)
-    sf.BackgroundColor3 = Color3.fromRGB(30, 27, 44); sf.BorderSizePixel = 0
-    sf.ScrollBarThickness = 5; sf.ZIndex = 20; sf.Parent = gui
-    Instance.new("UICorner", sf).CornerRadius = UDim.new(0, 6)
-    local lay = Instance.new("UIListLayout", sf); lay.SortOrder = Enum.SortOrder.LayoutOrder
-    local others = {}
-    for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
-    table.sort(others, function(a, b) return a.Name:lower() < b.Name:lower() end)
-    sf.CanvasSize = UDim2.fromOffset(0, #others * 24)
-    for _, pl in ipairs(others) do
-      local it = Instance.new("TextButton")
-      it.Size = UDim2.new(1, 0, 0, 24); it.BackgroundColor3 = Color3.fromRGB(38, 34, 54)
-      it.BorderSizePixel = 0; it.Font = Enum.Font.Gotham; it.TextSize = 12
-      it.TextColor3 = Color3.fromRGB(220, 214, 240); it.Text = pl.Name; it.ZIndex = 21; it.Parent = sf
-      it.MouseButton1Click:Connect(function()
-        g.SB_APPA_TARGET = pl.Name; render()
-        if openList then openList:Destroy(); openList = nil end
-      end)
-    end
-    openList = sf
-  end)
-  btnAppaGo.MouseButton1Click:Connect(function()
-    local ok, err = apparateTo(g.SB_APPA_TARGET)
-    if not ok then g.SB_STATUS = "Appa: " .. tostring(err) end
-    render()
-  end)
-  btnAppaLoad.MouseButton1Click:Connect(function()
-    g.SB_APPA_PENDING = true      -- naechster Klick castet appa; danach nichts nachladen
-    startSelector()
-    render()
-  end)
-
-  btnSafe.MouseButton1Click:Connect(function()
-    g.SB_SAFE = not g.SB_SAFE
-    if g.SB_SAFE then startSelector() end   -- Click-Cast-Rotation
-    render()
-  end)
-  btnAim.MouseButton1Click:Connect(function()
-    g.SB_AIM = not g.SB_AIM
-    if g.SB_AIM then startSelector(); startAim() end
-    render()
-  end)
-  btnPred.MouseButton1Click:Connect(function()
-    g.SB_AIM_PRED = not g.SB_AIM_PRED
-    render()
-  end)
-  btnNpc.MouseButton1Click:Connect(function()
-    g.SB_AIM_NPC = not g.SB_AIM_NPC
-    render()
-  end)
-  btnShield.MouseButton1Click:Connect(function()
-    g.SB_SHIELD = not g.SB_SHIELD
-    if g.SB_SHIELD then hookShield() end
-    render()
-  end)
-  btnClash.MouseButton1Click:Connect(function()
-    g.SB_CLASH = not g.SB_CLASH
-    if g.SB_CLASH then startClashAuto() end
-    render()
-  end)
-  btnDodge.MouseButton1Click:Connect(function()
-    g.SB_DODGE = not g.SB_DODGE
-    if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end   -- Pattern frisch starten
-    render()
-  end)
-
-  -- Dodge-Rate Slider: X-Position auf 0..100% mappen (0.1er-Schritte)
-  local sliderDragging = false
-  local function setPctFrom(px)
-    local w = math.max(sliderTrack.AbsoluteSize.X, 1)
-    local rel = math.clamp((px - sliderTrack.AbsolutePosition.X) / w, 0, 1)
-    g.SB_DODGE_PCT = math.floor(rel * 1000 + 0.5) / 10
-    render()
+    end)
+    table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
+      if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+        local d = i.Position - ds
+        panel.Position = UDim2.fromOffset(sp.X.Offset + d.X, sp.Y.Offset + d.Y)
+      end
+    end))
+    table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
+      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end))
+    return { body = body, ord = 0 }
   end
-  sliderTrack.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-      sliderDragging = true; setPctFrom(i.Position.X)
+
+  -- Baut den ein/ausklappbaren Einstellungs-Container (Rechtsklick / Pfeil)
+  local function makeExpander(panel, ord, arrow, buildSettings)
+    local expanded, sf = false, nil
+    local function toggle()
+      expanded = not expanded
+      if expanded then
+        sf = Instance.new("Frame"); sf.LayoutOrder = ord * 10 + 1
+        sf.Size = UDim2.new(1, 0, 0, 0); sf.AutomaticSize = Enum.AutomaticSize.Y
+        sf.BackgroundColor3 = Color3.fromRGB(22, 22, 32); sf.BorderSizePixel = 0; sf.Parent = panel.body
+        local sl = Instance.new("UIListLayout", sf); sl.SortOrder = Enum.SortOrder.LayoutOrder
+        sl.Padding = UDim.new(0, 3); sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        local spad = Instance.new("UIPadding", sf); spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
+        buildSettings(sf)
+        if arrow then arrow.Text = "\xe2\x80\x93" end
+      else
+        if sf then sf:Destroy(); sf = nil end
+        if arrow then arrow.Text = "+" end
+      end
+    end
+    return toggle
+  end
+
+  -- Modul-Zeile (Toggle) mit optionalen Einstellungen
+  local function addModule(panel, name, get, set, buildSettings)
+    panel.ord = panel.ord + 1
+    local ord = panel.ord
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 26); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
+    row.BackgroundColor3 = ROW_OFF; row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
+    row.TextSize = 13; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. name
+    row.TextColor3 = TXT_OFF; row.Parent = panel.body
+    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 3, 1, 0); bar.BorderSizePixel = 0
+    bar.BackgroundColor3 = ACCENT; bar.Visible = false; bar.Parent = row
+    local arrow
+    if buildSettings then
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(22, 26)
+      arrow.Position = UDim2.new(1, -22, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 15; arrow.TextColor3 = Color3.fromRGB(170, 170, 190)
+      arrow.Text = "+"; arrow.Parent = row
+    end
+    local function paint()
+      local on = get()
+      row.BackgroundColor3 = on and ROW_ON or ROW_OFF
+      row.TextColor3 = on and Color3.fromRGB(235, 225, 255) or TXT_OFF
+      bar.Visible = on
+    end
+    paint(); moduleRefs[#moduleRefs + 1] = paint
+    row.MouseButton1Click:Connect(function() set(not get()); paint() end)
+    if buildSettings then
+      local toggle = makeExpander(panel, ord, arrow, buildSettings)
+      arrow.MouseButton1Click:Connect(toggle)
+      row.MouseButton2Click:Connect(toggle)
+    end
+  end
+
+  -- Aktion-Zeile (kein Toggle) — z.B. Apparate / Appa laden
+  local function addAction(panel, labelFn, onClick, buildSettings)
+    panel.ord = panel.ord + 1
+    local ord = panel.ord
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, 26); row.LayoutOrder = ord * 10; row.AutoButtonColor = true
+    row.BackgroundColor3 = Color3.fromRGB(30, 30, 44); row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
+    row.TextSize = 13; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. labelFn()
+    row.TextColor3 = Color3.fromRGB(210, 215, 235); row.Parent = panel.body
+    moduleRefs[#moduleRefs + 1] = function() row.Text = "   " .. labelFn() end
+    local arrow
+    if buildSettings then
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(22, 26)
+      arrow.Position = UDim2.new(1, -22, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 15; arrow.TextColor3 = Color3.fromRGB(170, 170, 190)
+      arrow.Text = "+"; arrow.Parent = row
+    end
+    row.MouseButton1Click:Connect(function() onClick(); row.Text = "   " .. labelFn() end)
+    if buildSettings then
+      local toggle = makeExpander(panel, ord, arrow, buildSettings)
+      arrow.MouseButton1Click:Connect(toggle)
+      row.MouseButton2Click:Connect(toggle)
+    end
+  end
+
+  -- === Combat-Panel ===
+  local combat = makePanel("Combat", 30, 54)
+  addModule(combat, "Silent-Aim",
+    function() return g.SB_AIM end,
+    function(v) g.SB_AIM = v; if v then startSelector(); startAim() end end,
+    function(sf)
+      makeSliderW(sf, 1, "FOV", 20, 500, function() return tonumber(g.SB_AIM_FOV) or 140 end,
+        function(v) g.SB_AIM_FOV = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
+      makeSliderW(sf, 2, "Range", 50, 1000, function() return tonumber(g.SB_AIM_RANGE) or 500 end,
+        function(v) g.SB_AIM_RANGE = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
+      makeToggleW(sf, 3, "Vorhalt (Lead)", function() return g.SB_AIM_PRED == true end, function() g.SB_AIM_PRED = not g.SB_AIM_PRED end)
+      makeToggleW(sf, 4, "NPC-Aim", function() return g.SB_AIM_NPC == true end, function() g.SB_AIM_NPC = not g.SB_AIM_NPC end)
+      local lblEx = Instance.new("TextLabel"); lblEx.Size = UDim2.new(1, -12, 0, 16); lblEx.LayoutOrder = 5
+      lblEx.BackgroundTransparency = 1; lblEx.Font = Enum.Font.GothamBold; lblEx.TextSize = 11
+      lblEx.TextColor3 = Color3.fromRGB(160, 160, 180); lblEx.TextXAlignment = Enum.TextXAlignment.Left
+      lblEx.Text = "Aim-Ausnahmen:"; lblEx.Parent = sf
+      makePlayerToggles(sf, 6, function(n) return g.SB_AIM_EXEMPT[n] == true end,
+        function(n) if g.SB_AIM_EXEMPT[n] then g.SB_AIM_EXEMPT[n] = nil else g.SB_AIM_EXEMPT[n] = true end end)
+    end)
+  addModule(combat, "Auto-Shield",
+    function() return g.SB_SHIELD end,
+    function(v) g.SB_SHIELD = v; if v then hookShield() end end)
+  addModule(combat, "Auto-Clash",
+    function() return g.SB_CLASH end,
+    function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
+  addModule(combat, "Auto-Dodge",
+    function() return g.SB_DODGE end,
+    function(v) g.SB_DODGE = v; if v then g.SB_DODGE_SKIPACC = 0; hookDodge() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Dodge-Rate", 0, 100, function() return tonumber(g.SB_DODGE_PCT) or 100 end,
+        function(v) g.SB_DODGE_PCT = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1f%%", v) end)
+    end)
+  addModule(combat, "Safe-Combat",
+    function() return g.SB_SAFE end,
+    function(v) g.SB_SAFE = v; if v then startSelector() end end,
+    function(sf)
+      for i = 1, 4 do
+        makeDropdownW(sf, i, function() return "Slot " .. i .. ": " .. tostring(g.SB_SAFE_ROT[i]) end,
+          getSpellList, function(n) g.SB_SAFE_ROT[i] = n end)
+      end
+    end)
+
+  -- === Utility-Panel ===
+  local util = makePanel("Utility", 30 + PANEL_W + 16, 54)
+  addAction(util, function() return "Apparate \xe2\x86\x92 " .. tostring(g.SB_APPA_TARGET or "-") end,
+    function() apparateTo(g.SB_APPA_TARGET) end,
+    function(sf)
+      makeDropdownW(sf, 1, function() return "Ziel: " .. tostring(g.SB_APPA_TARGET or "-") end,
+        function()
+          local names = {}
+          for _, p in ipairs(Players:GetPlayers()) do if p ~= lp then names[#names + 1] = p.Name end end
+          table.sort(names); return names
+        end,
+        function(n) g.SB_APPA_TARGET = n end)
+    end)
+  addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
+    function() g.SB_APPA_PENDING = true; startSelector() end)
+
+  -- Hinweis unten in Utility
+  local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
+  hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
+  hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
+  hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Text = "Rechtsklick auf ein Modul = Settings.  RShift schliesst."
+  hint.Parent = util.body
+
+  -- === ArrayList (oben rechts, immer sichtbar) ===
+  local arrayHolder = Instance.new("Frame")
+  arrayHolder.AnchorPoint = Vector2.new(1, 0); arrayHolder.Position = UDim2.new(1, -6, 0, 6)
+  arrayHolder.Size = UDim2.fromOffset(0, 0); arrayHolder.AutomaticSize = Enum.AutomaticSize.XY
+  arrayHolder.BackgroundTransparency = 1; arrayHolder.Parent = gui
+  local al = Instance.new("UIListLayout", arrayHolder); al.SortOrder = Enum.SortOrder.LayoutOrder
+  al.HorizontalAlignment = Enum.HorizontalAlignment.Right; al.Padding = UDim.new(0, 2)
+  local ACTIVE = {
+    { "Silent-Aim",  function() return g.SB_AIM end },
+    { "Auto-Shield", function() return g.SB_SHIELD end },
+    { "Auto-Clash",  function() return g.SB_CLASH end },
+    { "Auto-Dodge",  function() return g.SB_DODGE end },
+    { "Safe-Combat", function() return g.SB_SAFE end },
+  }
+  local function rebuildArray()
+    for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
+    local on = {}
+    for _, m in ipairs(ACTIVE) do if m[2]() then on[#on + 1] = m[1] end end
+    table.sort(on, function(a, b) return #a > #b end)
+    for idx, nm in ipairs(on) do
+      local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
+      t.Size = UDim2.fromOffset(0, 18); t.LayoutOrder = idx
+      t.BackgroundColor3 = Color3.fromRGB(16, 16, 24); t.BackgroundTransparency = 0.15
+      t.Font = Enum.Font.GothamBold; t.TextSize = 13; t.TextColor3 = Color3.fromRGB(240, 240, 250)
+      t.Text = "  " .. nm .. "  "; t.Parent = arrayHolder
+      local b = Instance.new("Frame"); b.Size = UDim2.new(0, 2, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
+      b.BorderSizePixel = 0; b.BackgroundColor3 = ACCENT; b.Parent = t
+    end
+  end
+
+  -- Refresh-Loop: Modul-Farben + ArrayList (Toggles via Hotkey/extern spiegeln)
+  task.spawn(function()
+    while gui.Parent do
+      for _, p in ipairs(moduleRefs) do pcall(p) end
+      pcall(rebuildArray)
+      task.wait(0.2)
     end
   end)
-  table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
-    if sliderDragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-      setPctFrom(i.Position.X)
-    end
-  end))
-  table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then sliderDragging = false end
-  end))
 
+  -- RechtsShift = ClickGUI toggle; C/T/G bleiben Aktions-Hotkeys (F/H/P entfernt)
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
+    if i.KeyCode == Enum.KeyCode.RightShift then setOpen(not guiOpen); return end
     if gp then return end
-    if i.KeyCode == Enum.KeyCode.F then
-      g.SB_AIM = not g.SB_AIM; if g.SB_AIM then startSelector(); startAim() end; render()
-    elseif i.KeyCode == Enum.KeyCode.H then
-      g.SB_SHIELD = not g.SB_SHIELD; if g.SB_SHIELD then hookShield() end; render()
-    elseif i.KeyCode == Enum.KeyCode.P then
-      g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end; render()
-    elseif i.KeyCode == Enum.KeyCode.C then
-      g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end; render()
+    if i.KeyCode == Enum.KeyCode.C then
+      g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
-      g.SB_APPA_PENDING = true; startSelector(); render()   -- APPA LADEN
+      g.SB_APPA_PENDING = true; startSelector()
     end
   end))
 
-  task.spawn(function()
-    while gui.Parent do
-      render()
-      if g.SB_APPA_PENDING then
-        status.Text = "APPA bereit - Klick zum Casten"
-      elseif g.SB_AIM or g.SB_CLASH or g.SB_SAFE or g.SB_DODGE then
-        if g.SB_STATUS then status.Text = tostring(g.SB_STATUS)
-        elseif g.SB_CLASH and lp:GetAttribute("Client_IsClashing") == true then status.Text = "Clash aktiv - Hits: " .. tostring(g.SB_CLASH_HITS or 0)
-        elseif g.SB_SAFE then status.Text = "Safe: naechster -> " .. tostring(g.SB_SAFE_ROT[g.SB_ROT_IDX] or "?")
-        elseif g.SB_AIM then status.Text = "Silent-Aim: " .. (g.SB_AIM_TARGET and ("-> " .. tostring(g.SB_AIM_TARGET)) or "(Cursor)")
-        elseif g.SB_DODGE then status.Text = "Auto-Dodge scharf - Dodges: " .. tostring(g.SB_DODGE_POPS or 0)
-        else status.Text = "Auto-Clash scharf" end
-      else
-        status.Text = "F Aim | H Shield | P Clash | C Dodge | T Appa | G Appa-Load"
-      end
-      task.wait(0.15)
-    end
-  end)
-
-  -- Dragging
-  local dragging, dragStart, startPos
-  header.InputBegan:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-      dragging = true; dragStart = i.Position; startPos = main.Position
-    end
-  end)
-  table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
-    if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-      local d = i.Position - dragStart
-      main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-    end
-  end))
-  table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
-  end))
-
-  render()
   return gui
 end
 
