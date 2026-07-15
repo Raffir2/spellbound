@@ -44,6 +44,7 @@ g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
 g.SB_AIM_EXEMPT_FACTION = g.SB_AIM_EXEMPT_FACTION or {}  -- [factionId]=true -> ganze Fraktion aus Silent-Aim aus
+if g.SB_ESP_NAMES == nil then g.SB_ESP_NAMES = false end  -- Namen ueber der ESP-Box zeigen (Option)
 if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
@@ -439,8 +440,10 @@ local function startAim()
   table.insert(g.SB_CONNS, aimConn)
 end
 
---========================= Team-ESP (Fraktions-Anzeige) =========================--
--- Zeigt ueber jedem Spieler seinen Fraktions-Namen in der Fraktionsfarbe (Billboard).
+--========================= Team-ESP (Box + Namen) =========================--
+-- "Normaler" ESP: 2D-Box um jeden Spieler in seiner Fraktionsfarbe, optional der Name
+-- darueber (g.SB_ESP_NAMES). Das aktuelle Silent-Aim-Ziel wird lila hervorgehoben.
+local ESP_PURPLE = Color3.fromRGB(180, 70, 230)
 local function startTeamESP()
   if g.SB_ESP_CONN then return end
   local parent
@@ -451,41 +454,77 @@ local function startTeamESP()
   local old = parent:FindFirstChild("SB_TeamESP"); if old then old:Destroy() end
   local espGui = Instance.new("ScreenGui")
   espGui.Name = "SB_TeamESP"; espGui.ResetOnSpawn = false
+  espGui.IgnoreGuiInset = true; espGui.DisplayOrder = 500
   espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; espGui.Parent = parent
-  local labels = {}
-  local function clearAll() for _, bb in pairs(labels) do pcall(function() bb:Destroy() end) end; labels = {} end
-  g.SB_ESP_CONN = RunService.Heartbeat:Connect(function()
-    if not g.SB_TEAM_ESP then
-      if next(labels) then clearAll() end
-      return
+
+  local objs = {}   -- [player] = { box, stroke, nm }
+  local function clearAll() for _, o in pairs(objs) do pcall(function() o.box:Destroy() end) end; objs = {} end
+  -- 2D-Bildschirm-Bounding-Box aus den 8 Ecken der Character-BoundingBox
+  local function screenBox(char)
+    local cam = workspace.CurrentCamera; if not cam then return nil end
+    local cf, size = char:GetBoundingBox()
+    local sx, sy, sz = size.X * 0.5, size.Y * 0.5, size.Z * 0.5
+    local minX, minY, maxX, maxY, front = math.huge, math.huge, -math.huge, -math.huge, false
+    local corners = { {sx,sy,sz},{-sx,sy,sz},{sx,-sy,sz},{-sx,-sy,sz},{sx,sy,-sz},{-sx,sy,-sz},{sx,-sy,-sz},{-sx,-sy,-sz} }
+    for _, c in ipairs(corners) do
+      local wp = (cf * CFrame.new(c[1], c[2], c[3])).Position
+      local sp = cam:WorldToViewportPoint(wp)
+      if sp.Z > 0 then
+        front = true
+        if sp.X < minX then minX = sp.X end
+        if sp.Y < minY then minY = sp.Y end
+        if sp.X > maxX then maxX = sp.X end
+        if sp.Y > maxY then maxY = sp.Y end
+      end
     end
+    if not front then return nil end
+    return minX, minY, maxX, maxY
+  end
+
+  g.SB_ESP_CONN = RunService.Heartbeat:Connect(function()
+    if not g.SB_TEAM_ESP then if next(objs) then clearAll() end; return end
     for _, pl in ipairs(Players:GetPlayers()) do
       if pl ~= lp then
         local char = pl.Character
-        local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
-        if head then
-          local bb = labels[pl]
-          if not bb or not bb.Parent then
-            bb = Instance.new("BillboardGui")
-            bb.Size = UDim2.fromOffset(210, 18); bb.StudsOffset = Vector3.new(0, 3.4, 0)
-            bb.AlwaysOnTop = true; bb.MaxDistance = 1000; bb.Parent = espGui
-            local txt = Instance.new("TextLabel")
-            txt.Name = "Txt"; txt.Size = UDim2.fromScale(1, 1); txt.BackgroundTransparency = 1
-            txt.Font = Enum.Font.GothamBold; txt.TextSize = 13
-            txt.TextStrokeTransparency = 0.35; txt.TextStrokeColor3 = Color3.new(0, 0, 0)
-            txt.Parent = bb
-            labels[pl] = bb
-          end
-          bb.Adornee = head
-          local fid = playerFactionId(pl)
-          local txt = bb:FindFirstChild("Txt")
-          if fid then txt.Text = factionName(fid); txt.TextColor3 = factionColor(fid)
-          else txt.Text = "keine Fraktion"; txt.TextColor3 = Color3.fromRGB(165, 165, 175) end
+        local hrp  = char and char:FindFirstChild("HumanoidRootPart")
+        local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local o = objs[pl]
+        if not o then
+          local box = Instance.new("Frame")
+          box.Name = "Box"; box.BackgroundTransparency = 1; box.BorderSizePixel = 0; box.Parent = espGui
+          local stroke = Instance.new("UIStroke", box); stroke.Thickness = 1.6
+          stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+          local nm = Instance.new("TextLabel")
+          nm.Name = "Nm"; nm.BackgroundTransparency = 1; nm.Font = Enum.Font.GothamBold
+          nm.TextSize = 13; nm.TextStrokeTransparency = 0.4; nm.TextStrokeColor3 = Color3.new(0, 0, 0)
+          nm.Size = UDim2.fromOffset(200, 15); nm.Parent = box
+          o = { box = box, stroke = stroke, nm = nm }
+          objs[pl] = o
         end
+        local shown = false
+        if char and hrp and hum and hum.Health > 0 then
+          local minX, minY, maxX, maxY = screenBox(char)
+          if minX then
+            local w, ht = maxX - minX, maxY - minY
+            o.box.Position = UDim2.fromOffset(minX, minY)
+            o.box.Size = UDim2.fromOffset(w, ht)
+            local col = (g.SB_AIM_TARGET == pl.Name) and ESP_PURPLE or factionColor(playerFactionId(pl))
+            o.stroke.Color = col
+            o.box.Visible = true
+            if g.SB_ESP_NAMES then
+              o.nm.Visible = true
+              o.nm.Text = pl.Name
+              o.nm.TextColor3 = col
+              o.nm.Position = UDim2.fromOffset(w * 0.5 - 100, -16)
+            else o.nm.Visible = false end
+            shown = true
+          end
+        end
+        if not shown then o.box.Visible = false end
       end
     end
-    for pl, bb in pairs(labels) do
-      if not pl.Parent then pcall(function() bb:Destroy() end); labels[pl] = nil end
+    for pl, o in pairs(objs) do
+      if not pl.Parent then pcall(function() o.box:Destroy() end); objs[pl] = nil end
     end
   end)
   table.insert(g.SB_CONNS, g.SB_ESP_CONN)
@@ -1074,7 +1113,12 @@ local function mountGui()
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
   addModule(util, "Team-ESP",
     function() return g.SB_TEAM_ESP end,
-    function(v) g.SB_TEAM_ESP = v; if v then startTeamESP() end end)
+    function(v) g.SB_TEAM_ESP = v; if v then startTeamESP() end end,
+    function(sf)
+      makeToggleW(sf, 1, "Namen anzeigen",
+        function() return g.SB_ESP_NAMES == true end,
+        function() g.SB_ESP_NAMES = not g.SB_ESP_NAMES end)
+    end)
 
   -- Hinweis unten in Utility
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
