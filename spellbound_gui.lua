@@ -33,6 +33,7 @@ g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel 
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
+g.SB_TEAM_ESP, g.SB_ESP_CONN = false, nil   -- Team-ESP beim Reload aus, alte Loop-Referenz loeschen
 if g.SB_CONNS then
   for _, c in ipairs(g.SB_CONNS) do pcall(function() c:Disconnect() end) end
 end
@@ -42,6 +43,7 @@ g.SB_CONNS = {}
 g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
+g.SB_AIM_EXEMPT_FACTION = g.SB_AIM_EXEMPT_FACTION or {}  -- [factionId]=true -> ganze Fraktion aus Silent-Aim aus
 if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
@@ -304,6 +306,49 @@ local function disarmSpell()
   end
 end
 
+--========================= Fraktionen (Team-Zugehoerigkeit) =========================--
+-- Jeder Spieler traegt das Attribut "CurrentFactionId" (Roblox-Gruppen-ID). factionConfig
+-- listet die gueltigen Fraktionen (Farbe/Bild); die Klarnamen kommen aus GroupService.
+-- Aus dem Spiel geprueft: 553013368 = Covenant of Death Eaters, 967983905 = Ministry of
+-- Magic, 690294439 = Order of the Phoenix. factionConfig enthaelt genau diese 3.
+local okFC, factionConfig = pcall(function() return require(RS.shared.modules.factionConfig) end)
+if not okFC then factionConfig = nil end
+local FACTION_FALLBACK = {
+  [553013368] = "Covenant of Death Eaters",
+  [967983905] = "Ministry of Magic",
+  [690294439] = "Order of the Phoenix",
+}
+g.SB_FACTION_NAMES = g.SB_FACTION_NAMES or {}   -- id -> aufgeloester Name (Cache)
+local function factionIds()
+  local ids = {}
+  if factionConfig then for id in pairs(factionConfig) do if tonumber(id) then ids[#ids + 1] = tonumber(id) end end end
+  table.sort(ids)
+  return ids
+end
+local function factionColor(id)
+  if factionConfig and id and factionConfig[id] and typeof(factionConfig[id].color) == "Color3" then
+    return factionConfig[id].color
+  end
+  return Color3.fromRGB(200, 200, 210)
+end
+local function factionName(id)
+  if not id then return nil end
+  local cached = g.SB_FACTION_NAMES[id]
+  if cached then return cached end
+  -- sofort Fallback setzen (verhindert Doppel-Requests), Name async via GroupService verfeinern
+  g.SB_FACTION_NAMES[id] = FACTION_FALLBACK[id] or ("Fraktion " .. tostring(id))
+  task.spawn(function()
+    local ok, info = pcall(function() return game:GetService("GroupService"):GetGroupInfoAsync(id) end)
+    if ok and info and type(info.Name) == "string" then
+      g.SB_FACTION_NAMES[id] = (info.Name:gsub("^%s*%[%w+%]%s*", ""))   -- "[MB] "-Gruppentag strippen
+    end
+  end)
+  return g.SB_FACTION_NAMES[id]
+end
+local function playerFactionId(pl)
+  return pl and tonumber(pl:GetAttribute("CurrentFactionId")) or nil
+end
+
 --========================= Silent-Aim (Auto-Hit) =========================--
 local function startAim()
   if g.SB_AIM_LOOP then return end
@@ -362,7 +407,10 @@ local function startAim()
       end
     end
     for _, pl in ipairs(Players:GetPlayers()) do
-      if pl ~= lp then consider(pl.Character, pl.Name) end
+      if pl ~= lp then
+        local fid = playerFactionId(pl)
+        if not (fid and g.SB_AIM_EXEMPT_FACTION[fid]) then consider(pl.Character, pl.Name) end
+      end
     end
     -- NPCs (Workspace.Terrain.characters) nur wenn NPC-Aim aktiv
     if g.SB_AIM_NPC then
@@ -389,6 +437,58 @@ local function startAim()
     else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil end
   end)
   table.insert(g.SB_CONNS, aimConn)
+end
+
+--========================= Team-ESP (Fraktions-Anzeige) =========================--
+-- Zeigt ueber jedem Spieler seinen Fraktions-Namen in der Fraktionsfarbe (Billboard).
+local function startTeamESP()
+  if g.SB_ESP_CONN then return end
+  local parent
+  local ok, h = pcall(function() return gethui and gethui() end)
+  if ok and typeof(h) == "Instance" then parent = h end
+  if not parent then local ok2, c = pcall(function() return game:GetService("CoreGui") end); if ok2 then parent = c end end
+  if not parent then parent = lp:WaitForChild("PlayerGui") end
+  local old = parent:FindFirstChild("SB_TeamESP"); if old then old:Destroy() end
+  local espGui = Instance.new("ScreenGui")
+  espGui.Name = "SB_TeamESP"; espGui.ResetOnSpawn = false
+  espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; espGui.Parent = parent
+  local labels = {}
+  local function clearAll() for _, bb in pairs(labels) do pcall(function() bb:Destroy() end) end; labels = {} end
+  g.SB_ESP_CONN = RunService.Heartbeat:Connect(function()
+    if not g.SB_TEAM_ESP then
+      if next(labels) then clearAll() end
+      return
+    end
+    for _, pl in ipairs(Players:GetPlayers()) do
+      if pl ~= lp then
+        local char = pl.Character
+        local head = char and (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart"))
+        if head then
+          local bb = labels[pl]
+          if not bb or not bb.Parent then
+            bb = Instance.new("BillboardGui")
+            bb.Size = UDim2.fromOffset(210, 18); bb.StudsOffset = Vector3.new(0, 3.4, 0)
+            bb.AlwaysOnTop = true; bb.MaxDistance = 1000; bb.Parent = espGui
+            local txt = Instance.new("TextLabel")
+            txt.Name = "Txt"; txt.Size = UDim2.fromScale(1, 1); txt.BackgroundTransparency = 1
+            txt.Font = Enum.Font.GothamBold; txt.TextSize = 13
+            txt.TextStrokeTransparency = 0.35; txt.TextStrokeColor3 = Color3.new(0, 0, 0)
+            txt.Parent = bb
+            labels[pl] = bb
+          end
+          bb.Adornee = head
+          local fid = playerFactionId(pl)
+          local txt = bb:FindFirstChild("Txt")
+          if fid then txt.Text = factionName(fid); txt.TextColor3 = factionColor(fid)
+          else txt.Text = "keine Fraktion"; txt.TextColor3 = Color3.fromRGB(165, 165, 175) end
+        end
+      end
+    end
+    for pl, bb in pairs(labels) do
+      if not pl.Parent then pcall(function() bb:Destroy() end); labels[pl] = nil end
+    end
+  end)
+  table.insert(g.SB_CONNS, g.SB_ESP_CONN)
 end
 
 --========================= Reaktives Auto-Protego =========================--
@@ -638,6 +738,7 @@ local function mountGui()
   if not parent then local ok2, c = pcall(function() return game:GetService("CoreGui") end); if ok2 and c then parent = c end end
   if not parent then parent = lp:WaitForChild("PlayerGui") end
   local old = parent:FindFirstChild("SpellboundGUI"); if old then old:Destroy() end
+  local oldEsp = parent:FindFirstChild("SB_TeamESP"); if oldEsp then oldEsp:Destroy() end  -- alte ESP-Tags nach Reload entfernen
 
   local gui = Instance.new("ScreenGui")
   gui.Name = "SpellboundGUI"; gui.ResetOnSpawn = false
@@ -922,6 +1023,16 @@ local function mountGui()
       lblEx.Text = "Aim-Ausnahmen:"; lblEx.Parent = sf
       makePlayerToggles(sf, 6, function(n) return g.SB_AIM_EXEMPT[n] == true end,
         function(n) if g.SB_AIM_EXEMPT[n] then g.SB_AIM_EXEMPT[n] = nil else g.SB_AIM_EXEMPT[n] = true end end)
+      -- Ganze Fraktion ausnehmen (aus dem Spiel: factionConfig-IDs + GroupService-Namen)
+      local lblFac = Instance.new("TextLabel"); lblFac.Size = UDim2.new(1, -12, 0, 16); lblFac.LayoutOrder = 7
+      lblFac.BackgroundTransparency = 1; lblFac.Font = Enum.Font.GothamBold; lblFac.TextSize = 11
+      lblFac.TextColor3 = Color3.fromRGB(160, 160, 180); lblFac.TextXAlignment = Enum.TextXAlignment.Left
+      lblFac.Text = "Fraktions-Ausnahmen:"; lblFac.Parent = sf
+      for i, fid in ipairs(factionIds()) do
+        makeToggleW(sf, 7 + i, factionName(fid),
+          function() return g.SB_AIM_EXEMPT_FACTION[fid] == true end,
+          function() if g.SB_AIM_EXEMPT_FACTION[fid] then g.SB_AIM_EXEMPT_FACTION[fid] = nil else g.SB_AIM_EXEMPT_FACTION[fid] = true end end)
+      end
     end)
   addModule(combat, "Auto-Shield",
     function() return g.SB_SHIELD end,
@@ -961,6 +1072,9 @@ local function mountGui()
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
+  addModule(util, "Team-ESP",
+    function() return g.SB_TEAM_ESP end,
+    function(v) g.SB_TEAM_ESP = v; if v then startTeamESP() end end)
 
   -- Hinweis unten in Utility
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
