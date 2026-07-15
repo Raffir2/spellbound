@@ -24,6 +24,9 @@ local g = getgenv()
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
 g.SB_SAFE, g.SB_APPA_PENDING = false, false
+g.SB_DODGE = false               -- reaktiver Auto-Dodge (ROLL via LeftControl)
+g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
+g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
@@ -393,6 +396,76 @@ local function hookShield()
   end)
 end
 
+--========================= Reaktiver Auto-Dodge (ROLL) =========================--
+-- Gleiche Bedrohungserkennung wie Auto-Shield: prueft ob ein eingehender feindlicher
+-- Cast uns treffen wird. Der Dash haengt in Spellbound auf LeftControl (bindAction
+-- "Dash", Enum.KeyCode.LeftControl) -> ein kurzer Tap (<0.5s, moving) loest den ROLL
+-- aus. Wir tippen LeftControl nativ (keypress) an, damit der echte Dash-Handler laeuft
+-- (inkl. Bewegung/iFrames, respektiert den Client-Cooldown wie beim manuellen Spielen).
+-- Der Dodge feuert NUR wenn das Schild die Bedrohung nicht abfaengt (Shield aus oder
+-- gerade auf Cooldown). Der %-Slider drosselt gleichmaessig: 66.6% -> dodge,dodge,skip.
+local function threatenedByCast(pl)
+  if not (okSp and spellsMod and spellsMod.list) then return false end
+  local wand = pl and pl.wand; if not wand then return false end
+  local cc = wand:FindFirstAncestorWhichIsA("Model"); if not cc then return false end
+  if Players:GetPlayerFromCharacter(cc) == lp then return false end     -- nicht die eigenen Casts
+  local sd = spellsMod.list[pl.spellName]; if not (sd and sd.hostile) then return false end
+  local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if not myHRP then return false end
+  local me = myHRP.Position
+  local speed = sd.speed or 300
+  local originDist = pl.origin and (pl.origin - me).Magnitude or 9999
+  if originDist > speed * 1.8 then return false end                     -- zu weit -> keine akute Gefahr
+  if pl.target and (pl.target - me).Magnitude <= 16 then return true end
+  if pl.origin and pl.direction then
+    local o, d = pl.origin, pl.direction
+    local t = (me - o):Dot(d)
+    if t > 0 and t <= (sd.distance or 500) and ((o + d * t) - me).Magnitude <= 10 then return true end
+  end
+  return false
+end
+
+local function hookDodge()
+  if g.SB_DODGE_HOOKED then return end
+  local okP, packets = pcall(function() return require(RS.packets) end)
+  if not (okP and packets and packets.fireSpellReplication) then return end
+  g.SB_DODGE_HOOKED = true
+  packets.fireSpellReplication.listen(function(pl)
+    if not g.SB_DODGE then return end
+    if lp:GetAttribute("Client_IsClashing") == true then return end     -- waehrend Clash kein Dodge
+    if isRagdolled() then return end                                    -- ragdollt -> kein Dash moeglich
+    if not threatenedByCast(pl) then return end
+    -- Nur wenn das Schild NICHT bereit ist (aus oder auf Cooldown) -> sonst blockt das Schild
+    local shieldReady = g.SB_SHIELD and lp:GetAttribute("ProtegoActive") ~= true
+    if shieldReady then
+      local cd = tonumber(lp:GetAttribute("ProtegoCooldownFinishTime"))
+      if not (cd and cd >= workspace:GetServerTimeNow()) then return end -- Schild ready -> uebernimmt
+    end
+    -- Mindestabstand zwischen zwei Dodges (kein Ctrl-Gehaemmer bei Burst)
+    local now = os.clock()
+    if now - (tonumber(g.SB_DODGE_LAST) or 0) < 0.15 then return end
+    -- Prozent-Gate (skip-Akkumulator): bei 66.6% -> dodge,dodge,skip,dodge,dodge,skip...
+    local pct = tonumber(g.SB_DODGE_PCT) or 100
+    if pct <= 0 then return end
+    if pct < 100 then
+      local skipRate = (100 - pct) / 100
+      g.SB_DODGE_SKIPACC = (tonumber(g.SB_DODGE_SKIPACC) or 0) + skipRate
+      if g.SB_DODGE_SKIPACC >= 1 then
+        g.SB_DODGE_SKIPACC = g.SB_DODGE_SKIPACC - 1
+        return                                                          -- diesen dodge auslassen
+      end
+    end
+    g.SB_DODGE_LAST = now
+    -- ROLL = LeftControl kurz antippen (Tap < 0.5s). Nativer Input wie manuell.
+    task.spawn(function()
+      pcall(keypress, 0xA2)     -- LeftControl DOWN (VK_LCONTROL)
+      task.wait(0.06)
+      pcall(keyrelease, 0xA2)   -- LeftControl UP -> loest ROLL aus
+    end)
+    g.SB_DODGE_POPS = (tonumber(g.SB_DODGE_POPS) or 0) + 1
+  end)
+end
+
 --========================= Auto-Clash (Minigame-Win) =========================--
 -- Der Pointer-Winkel wird live auf Pointer.Rotation gespiegelt; der Goal-Arc ist
 -- Goal.Rotation (Start) + dessen UIGradient.Rotation (Groesse), analog der Bonus-Arc.
@@ -503,7 +576,7 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; gui.Parent = parent
 
   local main = Instance.new("Frame")
-  main.Size = UDim2.fromOffset(240, 516)
+  main.Size = UDim2.fromOffset(240, 574)
   main.Position = UDim2.fromScale(0.5, 0.3)
   main.BackgroundColor3 = Color3.fromRGB(24, 22, 34)
   main.BorderSizePixel = 0; main.Active = true; main.Parent = gui
@@ -549,18 +622,35 @@ local function mountGui()
   local btnRot4  = mkButton(426, 24)  -- Rotation Slot 4
   local rotBtns  = { btnRot1, btnRot2, btnRot3, btnRot4 }
   local btnAppaLoad = mkButton(454, 30)  -- appa in die Hand laden (Taste G)
+  local btnDodge = mkButton(488, 30)     -- AUTO-DODGE toggle (C)
+
+  -- Dodge-Rate Slider (Prozent, ziehbar)
+  local sliderTrack = Instance.new("Frame")
+  sliderTrack.Size = UDim2.new(1, -20, 0, 18); sliderTrack.Position = UDim2.fromOffset(10, 522)
+  sliderTrack.BackgroundColor3 = Color3.fromRGB(40, 36, 58); sliderTrack.BorderSizePixel = 0
+  sliderTrack.Active = true; sliderTrack.Parent = main
+  Instance.new("UICorner", sliderTrack).CornerRadius = UDim.new(0, 5)
+  local sliderFill = Instance.new("Frame")
+  sliderFill.Size = UDim2.new(1, 0, 1, 0); sliderFill.BackgroundColor3 = Color3.fromRGB(170, 120, 50)
+  sliderFill.BorderSizePixel = 0; sliderFill.Parent = sliderTrack
+  Instance.new("UICorner", sliderFill).CornerRadius = UDim.new(0, 5)
+  local sliderText = Instance.new("TextLabel")
+  sliderText.Size = UDim2.new(1, 0, 1, 0); sliderText.BackgroundTransparency = 1
+  sliderText.Font = Enum.Font.GothamBold; sliderText.TextSize = 12
+  sliderText.TextColor3 = Color3.fromRGB(255, 255, 255); sliderText.ZIndex = 2
+  sliderText.Text = "Dodge-Rate"; sliderText.Parent = sliderTrack
 
   local status = Instance.new("TextLabel")
-  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 488)
+  status.Size = UDim2.new(1, -20, 0, 20); status.Position = UDim2.fromOffset(10, 548)
   status.BackgroundTransparency = 1; status.Font = Enum.Font.Gotham; status.TextSize = 12
   status.TextColor3 = Color3.fromRGB(170, 160, 200); status.TextXAlignment = Enum.TextXAlignment.Left
   status.Text = "bereit"; status.Parent = main
 
   -- Ein-/Ausklappen (Header bleibt sichtbar; Hotkeys laufen unabhaengig weiter)
   local openList   -- offenes Dropdown (von Spell-/Exempt-/Appa-Listen genutzt)
-  local FULL_H = 516
+  local FULL_H = 574
   local collapsed = false
-  local content = { btnAim, btnPred, btnNpc, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, status }
+  local content = { btnAim, btnPred, btnNpc, btnShield, btnClash, btnExempt, btnAppa, btnAppaGo, btnSafe, btnRot1, btnRot2, btnRot3, btnRot4, btnAppaLoad, btnDodge, sliderTrack, status }
   local function setCollapsed(v)
     collapsed = v
     for _, c in ipairs(content) do c.Visible = not v end
@@ -608,6 +698,11 @@ local function mountGui()
     end
     btnAppaLoad.Text = g.SB_APPA_PENDING and "APPA GELADEN - jetzt casten!" or "APPA LADEN  [G]"
     btnAppaLoad.BackgroundColor3 = g.SB_APPA_PENDING and Color3.fromRGB(150,110,40) or Color3.fromRGB(60,120,150)
+    btnDodge.Text = g.SB_DODGE and "AUTO-DODGE: AN  [C]" or "AUTO-DODGE: AUS  [C]"
+    btnDodge.BackgroundColor3 = g.SB_DODGE and Color3.fromRGB(170,120,50) or Color3.fromRGB(70,62,96)
+    local dp = tonumber(g.SB_DODGE_PCT) or 100
+    sliderText.Text = string.format("Dodge-Rate: %.1f%%", dp)
+    sliderFill.Size = UDim2.new(math.clamp(dp/100, 0, 1), 0, 1, 0)
   end
 
   -- Dropdown (scrollbare Liste ueber dem Button)
@@ -749,6 +844,33 @@ local function mountGui()
     if g.SB_CLASH then startClashAuto() end
     render()
   end)
+  btnDodge.MouseButton1Click:Connect(function()
+    g.SB_DODGE = not g.SB_DODGE
+    if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end   -- Pattern frisch starten
+    render()
+  end)
+
+  -- Dodge-Rate Slider: X-Position auf 0..100% mappen (0.1er-Schritte)
+  local sliderDragging = false
+  local function setPctFrom(px)
+    local w = math.max(sliderTrack.AbsoluteSize.X, 1)
+    local rel = math.clamp((px - sliderTrack.AbsolutePosition.X) / w, 0, 1)
+    g.SB_DODGE_PCT = math.floor(rel * 1000 + 0.5) / 10
+    render()
+  end
+  sliderTrack.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+      sliderDragging = true; setPctFrom(i.Position.X)
+    end
+  end)
+  table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
+    if sliderDragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+      setPctFrom(i.Position.X)
+    end
+  end))
+  table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then sliderDragging = false end
+  end))
 
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
     if gp then return end
@@ -758,6 +880,8 @@ local function mountGui()
       g.SB_SHIELD = not g.SB_SHIELD; if g.SB_SHIELD then hookShield() end; render()
     elseif i.KeyCode == Enum.KeyCode.P then
       g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end; render()
+    elseif i.KeyCode == Enum.KeyCode.C then
+      g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end; render()
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
@@ -770,14 +894,15 @@ local function mountGui()
       render()
       if g.SB_APPA_PENDING then
         status.Text = "APPA bereit - Klick zum Casten"
-      elseif g.SB_AIM or g.SB_CLASH or g.SB_SAFE then
+      elseif g.SB_AIM or g.SB_CLASH or g.SB_SAFE or g.SB_DODGE then
         if g.SB_STATUS then status.Text = tostring(g.SB_STATUS)
         elseif g.SB_CLASH and lp:GetAttribute("Client_IsClashing") == true then status.Text = "Clash aktiv - Hits: " .. tostring(g.SB_CLASH_HITS or 0)
         elseif g.SB_SAFE then status.Text = "Safe: naechster -> " .. tostring(g.SB_SAFE_ROT[g.SB_ROT_IDX] or "?")
         elseif g.SB_AIM then status.Text = "Silent-Aim: " .. (g.SB_AIM_TARGET and ("-> " .. tostring(g.SB_AIM_TARGET)) or "(Cursor)")
+        elseif g.SB_DODGE then status.Text = "Auto-Dodge scharf - Dodges: " .. tostring(g.SB_DODGE_POPS or 0)
         else status.Text = "Auto-Clash scharf" end
       else
-        status.Text = "F Aim | H Shield | P Clash | T Appa | G Appa-Load"
+        status.Text = "F Aim | H Shield | P Clash | C Dodge | T Appa | G Appa-Load"
       end
       task.wait(0.15)
     end
