@@ -974,8 +974,9 @@ local function mountGui()
 
   -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
-    if i.KeyCode == Enum.KeyCode.RightShift or i.KeyCode == Enum.KeyCode.B then setOpen(not guiOpen); return end
-    if gp then return end
+    if i.KeyCode == Enum.KeyCode.RightShift then setOpen(not guiOpen); return end
+    if gp or UIS:GetFocusedTextBox() then return end       -- im Chat/TextBox: keine Hotkeys (auch kein B)
+    if i.KeyCode == Enum.KeyCode.B then setOpen(not guiOpen); return end
     if i.KeyCode == Enum.KeyCode.C then
       g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     elseif i.KeyCode == Enum.KeyCode.P then
