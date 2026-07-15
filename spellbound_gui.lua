@@ -276,6 +276,7 @@ local function startSelector()
         g.SB_STATUS = nil
         -- Vor-Equip: nach 0.4s ohne Cast den aktuellen Slot schon laden (naechster Klick feuert sofort)
         if g.SB_SAFE and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
+           and os.clock() >= (g.SB_APPA_LOCK or 0)
            and refs and refs.set and refs.state and not isStunnedOrBound() then
           if (os.clock() - (g.SB_LAST_CAST or 0)) >= 0.4 then
             local spell = g.SB_SAFE_ROT[g.SB_ROT_IDX] or g.SB_SAFE_ROT[1]
@@ -290,6 +291,17 @@ local function startSelector()
     g.SB_CURSE_LOOP = false
     g.SB_STATUS = nil
   end)
+end
+
+-- Entwaffnet den evtl. vorgeladenen Kampf-Spell SOFORT, damit ein Appa-Klick nicht
+-- gleichzeitig einen Spell nativ mitfeuert (nichts geladen -> Klick feuert keinen Spell).
+local function disarmSpell()
+  g.SB_PRELOADED = nil
+  local refs = g.SB_REFS
+  if refs and refs.state then
+    refs.state.loadedSpell = nil   -- nichts geladen
+    refs.state.casts = 1           -- Cooldown "aktiv" als zusaetzliche Sperre
+  end
 end
 
 --========================= Silent-Aim (Auto-Hit) =========================--
@@ -588,6 +600,9 @@ local function apparateTo(name)
   local target = troot.Position
   local guid = Http:GenerateGUID(false)
   if okReg and registry then registry[guid] = true end
+  -- Kampf-Spell entwaffnen + kurzes Fenster sperren, damit kein Spell zeitgleich zum Appa feuert
+  g.SB_APPA_LOCK = os.clock() + 0.4
+  disarmSpell()
   -- appa laden, dann auf Zielposition feuern (back-to-back, keine Yields -> Auto-Spell dazwischen unmoeglich)
   packets.loadSpellReplication.send({ spell = "appa", enabled = true, wand = wand })
   packets.uniqueSpellReplication.send({
@@ -945,7 +960,7 @@ local function mountGui()
         function(n) g.SB_APPA_TARGET = n end)
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
-    function() g.SB_APPA_PENDING = true; startSelector() end)
+    function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
 
   -- Hinweis unten in Utility
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
@@ -1027,7 +1042,7 @@ local function mountGui()
     elseif i.KeyCode == Enum.KeyCode.T then
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
-      g.SB_APPA_PENDING = true; startSelector()
+      g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
     end
   end))
 
