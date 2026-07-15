@@ -24,9 +24,8 @@ local g = getgenv()
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
 g.SB_SAFE, g.SB_APPA_PENDING = false, false
-g.SB_DODGE = false               -- reaktiver Auto-Dodge (client-Dash in Ausweichrichtung)
+g.SB_DODGE = false               -- reaktiver Auto-Dodge (ROLL via LeftControl)
 g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
-g.SB_DODGE_ACTIVE = false        -- laeuft gerade ein Dodge? (kein Ueberlappen)
 g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
@@ -401,11 +400,8 @@ end
 -- Gleiche Bedrohungserkennung wie Auto-Shield: prueft ob ein eingehender feindlicher
 -- Cast uns treffen wird. Der Dash haengt in Spellbound auf LeftControl (bindAction
 -- "Dash", Enum.KeyCode.LeftControl) -> ein kurzer Tap (<0.5s, moving) loest den ROLL
--- aus. Statt bloss LeftControl zu tippen (dash geht dann nur in Bewegungsrichtung und der
--- Koerper snappt/strafed unter Shiftlock) spiegeln wir den echten ROLL SELBST in eine
--- berechnete Ausweichrichtung: der Koerper dreht sich WEICH dorthin (kein Snap), gleiche
--- easeOut-Velocity + Dash-Anim + InDashingState-Attr. Richtung = seitlich weg vom Cast-Strahl,
--- per 90°-Regel gegen die BEWEGUNGSrichtung begrenzt (nie mehr als 90° wegdrehen; Blick egal).
+-- aus. Wir tippen LeftControl nativ (keypress) an, damit der echte Dash-Handler laeuft
+-- (inkl. Bewegung/iFrames, respektiert den Client-Cooldown wie beim manuellen Spielen).
 -- Der Dodge feuert NUR wenn das Schild die Bedrohung nicht abfaengt (Shield aus oder
 -- gerade auf Cooldown). Der %-Slider drosselt gleichmaessig: 66.6% -> dodge,dodge,skip.
 local function threatenedByCast(pl)
@@ -429,90 +425,6 @@ local function threatenedByCast(pl)
   return false
 end
 
--- Dash-Animation des Spiels laden (best effort), damit der Dodge wie das echte ROLL aussieht
-local okImp, import = pcall(function() return require(RS.import) end)
-local dashAnim = nil
-if okImp and import then pcall(function() dashAnim = import("animations/Dash") end) end
-local Debris = game:GetService("Debris")
-
-local function flatUnit(v)
-  if not v then return nil end
-  local f = Vector3.new(v.X, 0, v.Z)
-  if f.Magnitude < 1e-3 then return nil end
-  return f.Unit
-end
-
--- horizontale Ausweichrichtung: rechtwinklig weg vom Cast-Strahl (bzw. weg vom Ziel/Origin)
-local function escapeDir(pl, me)
-  local o, d = pl.origin, pl.direction
-  local dh = flatUnit(d)
-  if o and dh then
-    local t = (me - o):Dot(dh)
-    local away = flatUnit(me - (o + dh * t))            -- seitlich weg vom Strahl
-    if away then return away end
-    return flatUnit(Vector3.new(-dh.Z, 0, dh.X))        -- exakt auf dem Strahl -> zur Seite
-  end
-  if pl.target then return flatUnit(me - pl.target) end
-  if o then return flatUnit(me - o) end
-  return nil
-end
-
--- Client-Dash in dodgeDir: dreht den Koerper WEICH dorthin (kein Snap) und mirror't die
--- echte ROLL-Bewegung (easeOut, Speed 60, 0.5s) + Dash-Anim + InDashingState-Attr.
-local function doClientDodge(dodgeDir)
-  local char = lp.Character
-  local hum  = char and char:FindFirstChildOfClass("Humanoid")
-  local hrp  = char and char:FindFirstChild("HumanoidRootPart")
-  if not (hum and hrp and dodgeDir) then return end
-  if g.SB_DODGE_ACTIVE then return end
-  g.SB_DODGE_ACTIVE = true
-  local SPEED, DUR = 60, 0.5
-  pcall(function()
-    if dashAnim then
-      local animr = hum:FindFirstChildOfClass("Animator")
-      if animr then
-        local tr = animr:LoadAnimation(dashAnim)
-        tr.Priority = Enum.AnimationPriority.Action3
-        tr:Play(0.1, 1, 1.5)
-        Debris:AddItem(tr, 2)
-      end
-    end
-  end)
-  local prevAuto = hum.AutoRotate
-  hum.AutoRotate = false                                 -- wir drehen selbst (weich, kein Snap)
-  pcall(function() hum:SetAttribute("InDashingState", true) end)
-  hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, false)
-  hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, false)
-  local startRot  = hrp.CFrame - hrp.CFrame.Position     -- reine Start-Rotation
-  local targetRot = CFrame.lookAt(Vector3.new(), dodgeDir)
-  local t0 = os.clock()
-  local function finish()
-    pcall(function() hum:SetAttribute("InDashingState", false) end)
-    pcall(function()
-      hum:SetStateEnabled(Enum.HumanoidStateType.FallingDown, true)
-      hum:SetStateEnabled(Enum.HumanoidStateType.Ragdoll, true)
-      hum.AutoRotate = prevAuto
-    end)
-    g.SB_DODGE_ACTIVE = false
-  end
-  local conn
-  conn = RunService.RenderStepped:Connect(function()
-    if not (hrp.Parent and hum.Parent and hum.Health > 0) then conn:Disconnect(); finish(); return end
-    local elapsed = os.clock() - t0
-    local a = math.min(elapsed, DUR) / DUR
-    local rot = startRot:Lerp(targetRot, math.min(elapsed / 0.18, 1))   -- weiche Drehung ~0.18s
-    hrp.CFrame = CFrame.new(hrp.Position) * rot                         -- nur Rotation setzen
-    local vmag = -SPEED * a * a * a * a + SPEED                         -- easeOut wie dashMovement
-    if vmag <= 0 or elapsed >= DUR then
-      hrp.AssemblyLinearVelocity = Vector3.new(0, hrp.AssemblyLinearVelocity.Y, 0)
-      conn:Disconnect(); finish(); return
-    end
-    local vel = dodgeDir * vmag
-    hrp.AssemblyLinearVelocity = Vector3.new(vel.X, hrp.AssemblyLinearVelocity.Y, vel.Z)
-  end)
-  table.insert(g.SB_CONNS, conn)
-end
-
 local function hookDodge()
   if g.SB_DODGE_HOOKED then return end
   local okP, packets = pcall(function() return require(RS.packets) end)
@@ -530,18 +442,8 @@ local function hookDodge()
       if not (cd and cd >= workspace:GetServerTimeNow()) then return end -- Schild ready -> uebernimmt
     end
     -- Mindestabstand zwischen zwei Dodges (kein Ctrl-Gehaemmer bei Burst)
-    -- Geometrie: Ausweichrichtung berechnen + 90°-Regel gegen die Bewegungsrichtung
-    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
-    local hum = lp.Character and lp.Character:FindFirstChildOfClass("Humanoid")
-    if not (hrp and hum) then return end
-    local dodgeDir = escapeDir(pl, hrp.Position)
-    if not dodgeDir then return end
-    -- Characterrichtung = BEWEGUNGSrichtung (nicht Kamera/Blick). Steht man, greift die Regel nicht.
-    local charDir = flatUnit(hum.MoveDirection)
-    if charDir and dodgeDir:Dot(charDir) < 0 then return end            -- >90° weg -> zu sus, kein Dodge
-    if g.SB_DODGE_ACTIVE then return end                                -- laeuft noch ein Dodge
     local now = os.clock()
-    if now - (tonumber(g.SB_DODGE_LAST) or 0) < 0.2 then return end
+    if now - (tonumber(g.SB_DODGE_LAST) or 0) < 0.15 then return end
     -- Prozent-Gate (skip-Akkumulator): bei 66.6% -> dodge,dodge,skip,dodge,dodge,skip...
     local pct = tonumber(g.SB_DODGE_PCT) or 100
     if pct <= 0 then return end
@@ -554,7 +456,12 @@ local function hookDodge()
       end
     end
     g.SB_DODGE_LAST = now
-    doClientDodge(dodgeDir)                                             -- weich in dodgeDir drehen + dashen
+    -- ROLL = LeftControl kurz antippen (Tap < 0.5s). Nativer Input wie manuell.
+    task.spawn(function()
+      pcall(keypress, 0xA2)     -- LeftControl DOWN (VK_LCONTROL)
+      task.wait(0.06)
+      pcall(keyrelease, 0xA2)   -- LeftControl UP -> loest ROLL aus
+    end)
     g.SB_DODGE_POPS = (tonumber(g.SB_DODGE_POPS) or 0) + 1
   end)
 end
