@@ -33,7 +33,8 @@ g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel 
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
-g.SB_TEAM_ESP, g.SB_ESP_CONN = false, nil   -- Team-ESP beim Reload aus, alte Loop-Referenz loeschen
+g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = false, false, false   -- Visuals beim Reload aus
+g.SB_ESP_CONN = nil                                               -- alte Visual-Loop-Referenz loeschen
 if g.SB_CONNS then
   for _, c in ipairs(g.SB_CONNS) do pcall(function() c:Disconnect() end) end
 end
@@ -44,7 +45,6 @@ g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
 g.SB_AIM_EXEMPT_FACTION = g.SB_AIM_EXEMPT_FACTION or {}  -- [factionId]=true -> ganze Fraktion aus Silent-Aim aus
-if g.SB_ESP_NAMES == nil then g.SB_ESP_NAMES = false end  -- Namen ueber der ESP-Box zeigen (Option)
 if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
@@ -319,18 +319,28 @@ local FACTION_FALLBACK = {
   [967983905] = "Ministry of Magic",
   [690294439] = "Order of the Phoenix",
 }
+-- WICHTIG: factionConfig ist mit STRING-Keys ("553013368") indiziert, das Spieler-Attribut
+-- CurrentFactionId ist aber eine ZAHL -> auf numerische Keys normalisieren, sonst schlaegt
+-- der Farb-Lookup fehl (alles wurde grau). FACTION_COLOR: [numId] = Color3.
+local FACTION_COLOR = {}
+if factionConfig then
+  for k, v in pairs(factionConfig) do
+    local nk = tonumber(k)
+    if nk and type(v) == "table" and typeof(v.color) == "Color3" then FACTION_COLOR[nk] = v.color end
+  end
+end
+if not next(FACTION_COLOR) then   -- Fallback, falls factionConfig fehlt: wenigstens die IDs kennen
+  for id in pairs(FACTION_FALLBACK) do FACTION_COLOR[id] = Color3.fromRGB(200, 200, 210) end
+end
 g.SB_FACTION_NAMES = g.SB_FACTION_NAMES or {}   -- id -> aufgeloester Name (Cache)
 local function factionIds()
   local ids = {}
-  if factionConfig then for id in pairs(factionConfig) do if tonumber(id) then ids[#ids + 1] = tonumber(id) end end end
+  for id in pairs(FACTION_COLOR) do ids[#ids + 1] = id end
   table.sort(ids)
   return ids
 end
 local function factionColor(id)
-  if factionConfig and id and factionConfig[id] and typeof(factionConfig[id].color) == "Color3" then
-    return factionConfig[id].color
-  end
-  return Color3.fromRGB(200, 200, 210)
+  return (id and FACTION_COLOR[id]) or Color3.fromRGB(200, 200, 210)
 end
 local function factionName(id)
   if not id then return nil end
@@ -440,11 +450,13 @@ local function startAim()
   table.insert(g.SB_CONNS, aimConn)
 end
 
---========================= Team-ESP (Box + Namen) =========================--
--- "Normaler" ESP: 2D-Box um jeden Spieler in seiner Fraktionsfarbe, optional der Name
--- darueber (g.SB_ESP_NAMES). Das aktuelle Silent-Aim-Ziel wird lila hervorgehoben.
+--========================= Visuals: Box-ESP / Namen / Chams =========================--
+-- Drei unabhaengige Layer pro Spieler, alle in Fraktionsfarbe (Silent-Aim-Ziel = lila):
+--   Box-ESP  (g.SB_TEAM_ESP): 2D-Box um den Spieler.
+--   Namen    (g.SB_ESP_NAMES): Name ueber dem Kopf (getrennt von der Box schaltbar).
+--   Chams    (g.SB_CHAMS):     Highlight-Fuellung, DepthMode=Occluded -> nur sichtbare Teile.
 local ESP_PURPLE = Color3.fromRGB(180, 70, 230)
-local function startTeamESP()
+local function startVisuals()
   if g.SB_ESP_CONN then return end
   local parent
   local ok, h = pcall(function() return gethui and gethui() end)
@@ -457,8 +469,13 @@ local function startTeamESP()
   espGui.IgnoreGuiInset = true; espGui.DisplayOrder = 500
   espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; espGui.Parent = parent
 
-  local objs = {}   -- [player] = { box, stroke, nm }
-  local function clearAll() for _, o in pairs(objs) do pcall(function() o.box:Destroy() end) end; objs = {} end
+  local objs = {}   -- [player] = { box, stroke, nm, hl }
+  local function destroyObj(o)
+    pcall(function() o.box:Destroy() end)
+    pcall(function() if o.nm then o.nm:Destroy() end end)
+    pcall(function() if o.hl then o.hl:Destroy() end end)
+  end
+  local function clearAll() for _, o in pairs(objs) do destroyObj(o) end; objs = {} end
   -- 2D-Bildschirm-Bounding-Box aus den 8 Ecken der Character-BoundingBox
   local function screenBox(char)
     local cam = workspace.CurrentCamera; if not cam then return nil end
@@ -482,49 +499,62 @@ local function startTeamESP()
   end
 
   g.SB_ESP_CONN = RunService.Heartbeat:Connect(function()
-    if not g.SB_TEAM_ESP then if next(objs) then clearAll() end; return end
+    local anyLayer = g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS
+    if not anyLayer then if next(objs) then clearAll() end; return end
+    local needScreen = g.SB_TEAM_ESP or g.SB_ESP_NAMES
     for _, pl in ipairs(Players:GetPlayers()) do
       if pl ~= lp then
         local char = pl.Character
         local hrp  = char and char:FindFirstChild("HumanoidRootPart")
         local hum  = char and char:FindFirstChildOfClass("Humanoid")
+        local alive = char and hrp and hum and hum.Health > 0
         local o = objs[pl]
         if not o then
           local box = Instance.new("Frame")
-          box.Name = "Box"; box.BackgroundTransparency = 1; box.BorderSizePixel = 0; box.Parent = espGui
+          box.Name = "Box"; box.BackgroundTransparency = 1; box.BorderSizePixel = 0; box.Visible = false; box.Parent = espGui
           local stroke = Instance.new("UIStroke", box); stroke.Thickness = 1.6
           stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
           local nm = Instance.new("TextLabel")
           nm.Name = "Nm"; nm.BackgroundTransparency = 1; nm.Font = Enum.Font.GothamBold
           nm.TextSize = 13; nm.TextStrokeTransparency = 0.4; nm.TextStrokeColor3 = Color3.new(0, 0, 0)
-          nm.Size = UDim2.fromOffset(200, 15); nm.Parent = box
-          o = { box = box, stroke = stroke, nm = nm }
+          nm.Size = UDim2.fromOffset(220, 15); nm.Visible = false; nm.Parent = espGui
+          o = { box = box, stroke = stroke, nm = nm, hl = nil }
           objs[pl] = o
         end
-        local shown = false
-        if char and hrp and hum and hum.Health > 0 then
-          local minX, minY, maxX, maxY = screenBox(char)
-          if minX then
-            local w, ht = maxX - minX, maxY - minY
-            o.box.Position = UDim2.fromOffset(minX, minY)
-            o.box.Size = UDim2.fromOffset(w, ht)
-            local col = (g.SB_AIM_TARGET == pl.Name) and ESP_PURPLE or factionColor(playerFactionId(pl))
-            o.stroke.Color = col
-            o.box.Visible = true
-            if g.SB_ESP_NAMES then
-              o.nm.Visible = true
-              o.nm.Text = pl.Name
-              o.nm.TextColor3 = col
-              o.nm.Position = UDim2.fromOffset(w * 0.5 - 100, -16)
-            else o.nm.Visible = false end
-            shown = true
+        local col = (g.SB_AIM_TARGET == pl.Name) and ESP_PURPLE or factionColor(playerFactionId(pl))
+        -- Chams (Highlight, nur sichtbare Teile)
+        if g.SB_CHAMS and alive then
+          if not o.hl or not o.hl.Parent then
+            o.hl = Instance.new("Highlight")
+            o.hl.DepthMode = Enum.HighlightDepthMode.Occluded   -- "visible only"
+            o.hl.FillTransparency = 0.5; o.hl.OutlineTransparency = 0
+            o.hl.Parent = espGui
           end
+          o.hl.Adornee = char
+          o.hl.FillColor = col; o.hl.OutlineColor = col
+          o.hl.Enabled = true
+        elseif o.hl then o.hl.Enabled = false end
+        -- Box + Namen (brauchen Screen-Projektion)
+        local minX, minY, maxX, maxY
+        if needScreen and alive then minX, minY, maxX, maxY = screenBox(char) end
+        if minX then
+          local w, ht = maxX - minX, maxY - minY
+          if g.SB_TEAM_ESP then
+            o.box.Position = UDim2.fromOffset(minX, minY); o.box.Size = UDim2.fromOffset(w, ht)
+            o.stroke.Color = col; o.box.Visible = true
+          else o.box.Visible = false end
+          if g.SB_ESP_NAMES then
+            o.nm.Text = pl.Name; o.nm.TextColor3 = col
+            o.nm.Position = UDim2.fromOffset(minX + w * 0.5 - 110, minY - 16)
+            o.nm.Visible = true
+          else o.nm.Visible = false end
+        else
+          o.box.Visible = false; o.nm.Visible = false
         end
-        if not shown then o.box.Visible = false end
       end
     end
     for pl, o in pairs(objs) do
-      if not pl.Parent then pcall(function() o.box:Destroy() end); objs[pl] = nil end
+      if not pl.Parent then destroyObj(o); objs[pl] = nil end
     end
   end)
   table.insert(g.SB_CONNS, g.SB_ESP_CONN)
@@ -1111,14 +1141,15 @@ local function mountGui()
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
-  addModule(util, "Team-ESP",
+  addModule(util, "Box-ESP",
     function() return g.SB_TEAM_ESP end,
-    function(v) g.SB_TEAM_ESP = v; if v then startTeamESP() end end,
-    function(sf)
-      makeToggleW(sf, 1, "Namen anzeigen",
-        function() return g.SB_ESP_NAMES == true end,
-        function() g.SB_ESP_NAMES = not g.SB_ESP_NAMES end)
-    end)
+    function(v) g.SB_TEAM_ESP = v; if v then startVisuals() end end)
+  addModule(util, "ESP-Namen",
+    function() return g.SB_ESP_NAMES end,
+    function(v) g.SB_ESP_NAMES = v; if v then startVisuals() end end)
+  addModule(util, "Chams (sichtbar)",
+    function() return g.SB_CHAMS end,
+    function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
 
   -- Hinweis unten in Utility
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
