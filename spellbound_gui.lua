@@ -850,10 +850,6 @@ local function mountGui()
     gui.Enabled = not g.SB_STREAMPROOF
     local esp = gui.Parent and gui.Parent:FindFirstChild("SB_TeamESP")
     if esp then esp.Enabled = not g.SB_STREAMPROOF end
-    -- auch den Potassium-Bridge-Indikator ("● BRIDGE AKTIV") mit ausblenden
-    local cg = pcall(function() return game:GetService("CoreGui") end) and game:GetService("CoreGui") or nil
-    local bg = (cg and cg:FindFirstChild("ClaudeBridgeGui")) or (gui.Parent and gui.Parent:FindFirstChild("ClaudeBridgeGui"))
-    if bg then bg.Enabled = not g.SB_STREAMPROOF end
   end
   clickRoot.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
