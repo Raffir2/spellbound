@@ -34,6 +34,7 @@ g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
 g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = false, false, false   -- Visuals beim Reload aus
+g.SB_STREAMPROOF = false                                          -- Streamproof (alle Visuals blind) beim Reload aus
 g.SB_ESP_CONN = nil                                               -- alte Visual-Loop-Referenz loeschen
 if g.SB_CONNS then
   for _, c in ipairs(g.SB_CONNS) do pcall(function() c:Disconnect() end) end
@@ -470,6 +471,7 @@ local function startVisuals()
   local espGui = Instance.new("ScreenGui")
   espGui.Name = "SB_TeamESP"; espGui.ResetOnSpawn = false
   espGui.IgnoreGuiInset = true; espGui.DisplayOrder = 500
+  espGui.Enabled = not g.SB_STREAMPROOF          -- respektiert einen aktiven Streamproof-Modus
   espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; espGui.Parent = parent
 
   local objs = {}   -- [player] = { box, stroke, nm, hl }
@@ -840,6 +842,15 @@ local function mountGui()
   clickRoot.Active = true; clickRoot.Visible = false; clickRoot.Parent = gui
   local guiOpen = false
   local function setOpen(v) guiOpen = v; clickRoot.Visible = v; if not v then closeList() end end
+  -- Streamproof: blendet ALLE Visuals aus, bis erneut gedrueckt (Hotkey: Bild-Ab / PageDown).
+  -- gui.Enabled=false versteckt Panel, Watermark UND ArrayList in einem Rutsch; das ESP/Chams-
+  -- Overlay (SB_TeamESP) wird separat abgeschaltet. Die Cheats laufen unsichtbar weiter.
+  local function setStreamproof(on)
+    g.SB_STREAMPROOF = on and true or false
+    gui.Enabled = not g.SB_STREAMPROOF
+    local esp = gui.Parent and gui.Parent:FindFirstChild("SB_TeamESP")
+    if esp then esp.Enabled = not g.SB_STREAMPROOF end
+  end
   clickRoot.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
   end)
@@ -1214,6 +1225,9 @@ local function mountGui()
   lgh.TextXAlignment = Enum.TextXAlignment.Left
   lgh.Text = "0% = voller Cheat. Bei X% failt jede Aktion (Aim/Dodge/Shield/Clash/Cast) mit X% Wahrscheinlichkeit."
   lgh.Parent = cfg.body
+  addModule(cfg, "Streamproof [Bild-Ab]",
+    function() return g.SB_STREAMPROOF == true end,
+    function(v) setStreamproof(v) end)
 
   -- === ArrayList (oben rechts, immer sichtbar) ===
   local arrayHolder = Instance.new("Frame")
@@ -1265,6 +1279,7 @@ local function mountGui()
 
   -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
+    if i.KeyCode == Enum.KeyCode.PageDown then setStreamproof(not g.SB_STREAMPROOF); return end  -- Bild-Ab: Streamproof
     if i.KeyCode == Enum.KeyCode.RightShift then setOpen(not guiOpen); return end
     if gp or UIS:GetFocusedTextBox() then return end       -- im Chat/TextBox: keine Hotkeys (auch kein B)
     if i.KeyCode == Enum.KeyCode.B then setOpen(not guiOpen); return end
