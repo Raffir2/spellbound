@@ -1355,6 +1355,37 @@ local function mountGui()
     end
   end))
 
+  -- === Staff-Join-Alert: rote 3s-Meldung, wenn ein Moderator den Server betritt ===
+  -- An gui geparentet -> respektiert Streamproof (bei aktivem Streamproof kein Banner auf dem Stream).
+  local function staffAlert(name)
+    local a = Instance.new("TextLabel")
+    a.AnchorPoint = Vector2.new(0.5, 0); a.Position = UDim2.new(0.5, 0, 0, 90)
+    a.Size = UDim2.fromOffset(0, 36); a.AutomaticSize = Enum.AutomaticSize.X
+    a.BackgroundColor3 = Color3.fromRGB(20, 0, 0); a.BackgroundTransparency = 0.12
+    a.BorderSizePixel = 0; a.Font = Enum.Font.GothamBlack; a.TextSize = 22
+    a.TextColor3 = Color3.fromRGB(255, 40, 40)
+    a.Text = "   STAFF JOINED: " .. tostring(name) .. "   "; a.ZIndex = 80; a.Parent = gui
+    Instance.new("UICorner", a).CornerRadius = UDim.new(0, 6)
+    local st = Instance.new("UIStroke", a); st.Color = Color3.fromRGB(255, 40, 40); st.Thickness = 1.5
+    task.delay(3, function() pcall(function() a:Destroy() end) end)
+  end
+  -- Neuer Spieler: sofort pruefen; das Attribut IsModerator kommt evtl. erst kurz nach dem
+  -- Join -> zusaetzlich kurz auf die Attribut-Aenderung horchen (bis 15s, dann aufgeben).
+  local function watchStaff(pl)
+    if pl == lp then return end
+    if isStaff(pl) then staffAlert(pl.Name); return end
+    local conn
+    conn = pl:GetAttributeChangedSignal("IsModerator"):Connect(function()
+      if pl:GetAttribute("IsModerator") == true then
+        staffAlert(pl.Name)
+        if conn then conn:Disconnect() end
+      end
+    end)
+    table.insert(g.SB_CONNS, conn)
+    task.delay(15, function() if conn then pcall(function() conn:Disconnect() end) end end)
+  end
+  table.insert(g.SB_CONNS, Players.PlayerAdded:Connect(watchStaff))
+
   return gui
 end
 
