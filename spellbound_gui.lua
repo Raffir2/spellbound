@@ -45,6 +45,7 @@ g.SB_AIM_FOV     = g.SB_AIM_FOV     or 140
 g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
 g.SB_AIM_EXEMPT_FACTION = g.SB_AIM_EXEMPT_FACTION or {}  -- [factionId]=true -> ganze Fraktion aus Silent-Aim aus
+g.SB_AIM_KEEP = g.SB_AIM_KEEP or {}  -- [Name]=true -> trotz Fraktions-Ausnahme doch anvisieren (Override)
 if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
@@ -420,7 +421,9 @@ local function startAim()
     for _, pl in ipairs(Players:GetPlayers()) do
       if pl ~= lp then
         local fid = playerFactionId(pl)
-        if not (fid and g.SB_AIM_EXEMPT_FACTION[fid]) then consider(pl.Character, pl.Name) end
+        -- Fraktion ausgenommen? -> ueberspringen, ausser der Spieler steht in der Keep-Target-Liste
+        local facExempt = fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name]
+        if not facExempt then consider(pl.Character, pl.Name) end
       end
     end
     -- NPCs (Workspace.Terrain.characters) nur wenn NPC-Aim aktiv
@@ -1097,11 +1100,52 @@ local function mountGui()
       lblFac.BackgroundTransparency = 1; lblFac.Font = Enum.Font.GothamBold; lblFac.TextSize = 11
       lblFac.TextColor3 = Color3.fromRGB(160, 160, 180); lblFac.TextXAlignment = Enum.TextXAlignment.Left
       lblFac.Text = "Fraktions-Ausnahmen:"; lblFac.Parent = sf
+      local refreshKeep   -- forward-declared: baut die Keep-Target-Liste bei Fraktions-Aenderung neu
       for i, fid in ipairs(factionIds()) do
         makeToggleW(sf, 7 + i, factionName(fid),
           function() return g.SB_AIM_EXEMPT_FACTION[fid] == true end,
-          function() if g.SB_AIM_EXEMPT_FACTION[fid] then g.SB_AIM_EXEMPT_FACTION[fid] = nil else g.SB_AIM_EXEMPT_FACTION[fid] = true end end)
+          function()
+            if g.SB_AIM_EXEMPT_FACTION[fid] then g.SB_AIM_EXEMPT_FACTION[fid] = nil else g.SB_AIM_EXEMPT_FACTION[fid] = true end
+            if refreshKeep then refreshKeep() end
+          end)
       end
+      -- Keep-Target: einzelne Mitglieder ausgenommener Fraktionen doch anvisieren (Override der Fraktions-Ausnahme)
+      local lblKeep = Instance.new("TextLabel"); lblKeep.Size = UDim2.new(1, -12, 0, 16); lblKeep.LayoutOrder = 20
+      lblKeep.BackgroundTransparency = 1; lblKeep.Font = Enum.Font.GothamBold; lblKeep.TextSize = 11
+      lblKeep.TextColor3 = Color3.fromRGB(190, 150, 235); lblKeep.TextXAlignment = Enum.TextXAlignment.Left
+      lblKeep.Text = "Keep-Target (trotzdem anvisieren):"; lblKeep.Parent = sf
+      local keepHost = Instance.new("Frame"); keepHost.LayoutOrder = 21; keepHost.BackgroundTransparency = 1
+      keepHost.Size = UDim2.new(1, 0, 0, 0); keepHost.AutomaticSize = Enum.AutomaticSize.Y; keepHost.Parent = sf
+      local keepLay = Instance.new("UIListLayout", keepHost); keepLay.SortOrder = Enum.SortOrder.LayoutOrder; keepLay.Padding = UDim.new(0, 3)
+      refreshKeep = function()
+        for _, c in ipairs(keepHost:GetChildren()) do if not c:IsA("UIListLayout") then c:Destroy() end end
+        local mem = {}
+        for _, pl in ipairs(Players:GetPlayers()) do
+          if pl ~= lp then
+            local fid = playerFactionId(pl)
+            if fid and g.SB_AIM_EXEMPT_FACTION[fid] then mem[#mem + 1] = pl end
+          end
+        end
+        table.sort(mem, function(a, b) return a.Name:lower() < b.Name:lower() end)
+        if #mem == 0 then
+          local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -12, 0, 18); none.LayoutOrder = 1
+          none.BackgroundTransparency = 1; none.Font = Enum.Font.Gotham; none.TextSize = 11
+          none.TextColor3 = Color3.fromRGB(150, 150, 165); none.TextXAlignment = Enum.TextXAlignment.Left
+          none.Text = "  keine ausgenommene Fraktion online"; none.Parent = keepHost; return
+        end
+        local ROW, MAXR = 22, 5
+        local scr = Instance.new("ScrollingFrame"); scr.LayoutOrder = 1
+        scr.Size = UDim2.new(1, 0, 0, math.min(#mem, MAXR) * ROW); scr.BackgroundTransparency = 1
+        scr.BorderSizePixel = 0; scr.ScrollBarThickness = 4; scr.ScrollBarImageColor3 = Color3.fromRGB(150, 120, 200)
+        scr.CanvasSize = UDim2.fromOffset(0, #mem * ROW); scr.ScrollingDirection = Enum.ScrollingDirection.Y; scr.Parent = keepHost
+        local sl = Instance.new("UIListLayout", scr); sl.SortOrder = Enum.SortOrder.LayoutOrder
+        for i, pl in ipairs(mem) do
+          makeToggleW(scr, i, pl.Name,
+            function() return g.SB_AIM_KEEP[pl.Name] == true end,
+            function() if g.SB_AIM_KEEP[pl.Name] then g.SB_AIM_KEEP[pl.Name] = nil else g.SB_AIM_KEEP[pl.Name] = true end end)
+        end
+      end
+      refreshKeep()
     end)
   addModule(combat, "Auto-Shield",
     function() return g.SB_SHIELD end,
