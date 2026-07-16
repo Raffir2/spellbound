@@ -34,6 +34,7 @@ g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
 g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = false, false, false   -- Visuals beim Reload aus
+g.SB_STAFF_ESP = false                                            -- Staff-Hervorhebung beim Reload aus
 g.SB_STREAMPROOF = false                                          -- Streamproof (alle Visuals blind) beim Reload aus
 g.SB_ESP_CONN = nil                                               -- alte Visual-Loop-Referenz loeschen
 if g.SB_CONNS then
@@ -47,6 +48,7 @@ g.SB_AIM_RANGE   = g.SB_AIM_RANGE   or 500
 g.SB_AIM_EXEMPT  = g.SB_AIM_EXEMPT  or {}   -- [Name]=true -> von Silent-Aim ausgenommen
 g.SB_AIM_EXEMPT_FACTION = g.SB_AIM_EXEMPT_FACTION or {}  -- [factionId]=true -> ganze Fraktion aus Silent-Aim aus
 g.SB_AIM_KEEP = g.SB_AIM_KEEP or {}  -- [Name]=true -> trotz Fraktions-Ausnahme doch anvisieren (Override)
+if g.SB_AIM_SKIP_STAFF == nil then g.SB_AIM_SKIP_STAFF = false end  -- Silent-Aim auf Staff (Moderatoren) auslassen
 if g.SB_AIM_NPC == nil then g.SB_AIM_NPC = false end  -- Silent-Aim auch auf NPCs
 -- Vorhalt (Lead-Prediction): Projektil-Flugzeit einrechnen, dorthin zielen wo das Ziel sein WIRD.
 -- Speed wird automatisch aus dem geladenen Spell gelesen (spells.list[name].speed).
@@ -361,6 +363,10 @@ end
 local function playerFactionId(pl)
   return pl and tonumber(pl:GetAttribute("CurrentFactionId")) or nil
 end
+-- Staff-Erkennung: das Spiel setzt bei Moderatoren das Attribut IsModerator=true.
+local function isStaff(pl)
+  return pl and pl:GetAttribute("IsModerator") == true
+end
 
 --========================= Silent-Aim (Auto-Hit) =========================--
 local function startAim()
@@ -424,7 +430,9 @@ local function startAim()
         local fid = playerFactionId(pl)
         -- Fraktion ausgenommen? -> ueberspringen, ausser der Spieler steht in der Keep-Target-Liste
         local facExempt = fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name]
-        if not facExempt then consider(pl.Character, pl.Name) end
+        -- Staff ausgenommen? (Moderatoren) -> ueberspringen, Keep-Target hebt es ebenfalls auf
+        local staffExempt = g.SB_AIM_SKIP_STAFF and isStaff(pl) and not g.SB_AIM_KEEP[pl.Name]
+        if not facExempt and not staffExempt then consider(pl.Character, pl.Name) end
       end
     end
     -- NPCs (Workspace.Terrain.characters) nur wenn NPC-Aim aktiv
@@ -460,6 +468,7 @@ end
 --   Namen    (g.SB_ESP_NAMES): Name ueber dem Kopf (getrennt von der Box schaltbar).
 --   Chams    (g.SB_CHAMS):     Highlight-Fuellung, DepthMode=Occluded -> nur sichtbare Teile.
 local ESP_PURPLE = Color3.fromRGB(180, 70, 230)
+local STAFF_BLUE = Color3.fromRGB(45, 155, 255)   -- helles Blau fuer Staff-Highlight + "Moderator"-Label
 local function startVisuals()
   if g.SB_ESP_CONN then return end
   local parent
@@ -478,7 +487,9 @@ local function startVisuals()
   local function destroyObj(o)
     pcall(function() o.box:Destroy() end)
     pcall(function() if o.nm then o.nm:Destroy() end end)
+    pcall(function() if o.sub then o.sub:Destroy() end end)
     pcall(function() if o.hl then o.hl:Destroy() end end)
+    pcall(function() if o.shl then o.shl:Destroy() end end)
   end
   local function clearAll() for _, o in pairs(objs) do destroyObj(o) end; objs = {} end
   -- 2D-Bildschirm-Bounding-Box aus den 8 Ecken der Character-BoundingBox
@@ -504,7 +515,7 @@ local function startVisuals()
   end
 
   g.SB_ESP_CONN = RunService.Heartbeat:Connect(function()
-    local anyLayer = g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS
+    local anyLayer = g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS or g.SB_STAFF_ESP
     if not anyLayer then if next(objs) then clearAll() end; return end
     local needScreen = g.SB_TEAM_ESP or g.SB_ESP_NAMES
     for _, pl in ipairs(Players:GetPlayers()) do
@@ -523,10 +534,25 @@ local function startVisuals()
           nm.Name = "Nm"; nm.BackgroundTransparency = 1; nm.Font = Enum.Font.GothamBold
           nm.TextSize = 13; nm.TextStrokeTransparency = 0.4; nm.TextStrokeColor3 = Color3.new(0, 0, 0)
           nm.Size = UDim2.fromOffset(220, 15); nm.Visible = false; nm.Parent = espGui
-          o = { box = box, stroke = stroke, nm = nm, hl = nil }
+          -- Zweite Zeile unter dem Namen: "Moderator" (nur bei Staff), hellblau
+          local sub = Instance.new("TextLabel")
+          sub.Name = "Sub"; sub.BackgroundTransparency = 1; sub.Font = Enum.Font.GothamBold
+          sub.TextSize = 12; sub.TextStrokeTransparency = 0.4; sub.TextStrokeColor3 = Color3.new(0, 0, 0)
+          sub.Size = UDim2.fromOffset(220, 14); sub.Visible = false; sub.Parent = espGui
+          o = { box = box, stroke = stroke, nm = nm, sub = sub, hl = nil, shl = nil }
           objs[pl] = o
         end
-        local col = (g.SB_AIM_TARGET == pl.Name) and ESP_PURPLE or factionColor(playerFactionId(pl))
+        -- Farbe: Silent-Aim-Ziel = lila. Staff ohne Fraktion = standardmaessig hellblau
+        -- (statt grauer Fallback). Sonst Fraktionsfarbe.
+        local pfid = playerFactionId(pl)
+        local col
+        if g.SB_AIM_TARGET == pl.Name then
+          col = ESP_PURPLE
+        elseif isStaff(pl) and not pfid then
+          col = STAFF_BLUE
+        else
+          col = factionColor(pfid)
+        end
         -- Chams (Highlight, nur sichtbare Teile)
         if g.SB_CHAMS and alive then
           if not o.hl or not o.hl.Parent then
@@ -539,6 +565,18 @@ local function startVisuals()
           o.hl.FillColor = col; o.hl.OutlineColor = col
           o.hl.Enabled = true
         elseif o.hl then o.hl.Enabled = false end
+        -- Staff-Highlight (immer hellblau, durch Waende sichtbar -> man sieht sofort einen Mod)
+        if g.SB_STAFF_ESP and alive and isStaff(pl) then
+          if not o.shl or not o.shl.Parent then
+            o.shl = Instance.new("Highlight")
+            o.shl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+            o.shl.FillTransparency = 0.6; o.shl.OutlineTransparency = 0
+            o.shl.Parent = espGui
+          end
+          o.shl.Adornee = char
+          o.shl.FillColor = STAFF_BLUE; o.shl.OutlineColor = STAFF_BLUE
+          o.shl.Enabled = true
+        elseif o.shl then o.shl.Enabled = false end
         -- Box + Namen (brauchen Screen-Projektion)
         local minX, minY, maxX, maxY
         if needScreen and alive then minX, minY, maxX, maxY = screenBox(char) end
@@ -552,9 +590,15 @@ local function startVisuals()
             o.nm.Text = pl.Name; o.nm.TextColor3 = col
             o.nm.Position = UDim2.fromOffset(minX + w * 0.5 - 110, minY - 16)
             o.nm.Visible = true
-          else o.nm.Visible = false end
+            -- "Moderator" direkt unter dem Namen, hellblau (nur bei Staff)
+            if isStaff(pl) then
+              o.sub.Text = "Moderator"; o.sub.TextColor3 = STAFF_BLUE
+              o.sub.Position = UDim2.fromOffset(minX + w * 0.5 - 110, minY - 3)
+              o.sub.Visible = true
+            else o.sub.Visible = false end
+          else o.nm.Visible = false; o.sub.Visible = false end
         else
-          o.box.Visible = false; o.nm.Visible = false
+          o.box.Visible = false; o.nm.Visible = false; o.sub.Visible = false
         end
       end
     end
@@ -1205,6 +1249,23 @@ local function mountGui()
   addModule(util, "Chams (sichtbar)",
     function() return g.SB_CHAMS end,
     function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
+  -- Staff-Optionen (aufklappbar): Silent-Aim fuer Staff aussetzen + Staff hervorheben
+  addAction(util, function() return "Staff-Optionen" end,
+    function() end,
+    function(sf)
+      makeToggleW(sf, 1, "Silent-Aim aus fuer Staff",
+        function() return g.SB_AIM_SKIP_STAFF == true end,
+        function() g.SB_AIM_SKIP_STAFF = not g.SB_AIM_SKIP_STAFF end)
+      makeToggleW(sf, 2, "Staff hervorheben",
+        function() return g.SB_STAFF_ESP == true end,
+        function() g.SB_STAFF_ESP = not g.SB_STAFF_ESP; if g.SB_STAFF_ESP then startVisuals() end end)
+      local info = Instance.new("TextLabel"); info.Size = UDim2.new(1, -12, 0, 40); info.LayoutOrder = 3
+      info.BackgroundTransparency = 1; info.Font = Enum.Font.Gotham; info.TextSize = 11
+      info.TextColor3 = Color3.fromRGB(150, 150, 170); info.TextWrapped = true
+      info.TextXAlignment = Enum.TextXAlignment.Left
+      info.Text = "Staff = Moderatoren (Attribut IsModerator). Bei ESP-Namen steht 'Moderator' in Blau unter dem Namen."
+      info.Parent = sf
+    end)
 
   -- Hinweis unten in Utility
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
