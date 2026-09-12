@@ -376,6 +376,41 @@ local function isStaff(pl)
   return pl and pl:GetAttribute("IsModerator") == true
 end
 
+--========================= Aim-Helfer (geteilt: Silent-Aim + Autofarm) =========================--
+-- Projektilgeschwindigkeit des AKTUELL geladenen Spells automatisch ablesen.
+local function spellSpeed()
+  local refs   = g.SB_REFS
+  local loaded = refs and refs.state and refs.state.loadedSpell
+  local slist  = (okSp and spellsMod and spellsMod.list) or nil
+  if loaded and slist and slist[loaded] and tonumber(slist[loaded].speed) then
+    g.SB_AIM_DETECTED, g.SB_AIM_DETSPELL = tonumber(slist[loaded].speed), loaded
+    return tonumber(slist[loaded].speed)
+  end
+  return tonumber(g.SB_AIM_PROJSPEED) or 250   -- Fallback wenn nichts geladen / kein Speed-Feld
+end
+-- Vorhalt: loese iterativ wo das Ziel bei Projektil-Ankunft ist (pos + vel * flugzeit)
+local function leadPos(origin, pos, vel, speed)
+  if not speed or speed <= 0 or not vel then return pos end
+  local t = (pos - origin).Magnitude / speed
+  for _ = 1, 4 do
+    local p = pos + vel * t
+    t = (p - origin).Magnitude / speed
+  end
+  return pos + vel * t
+end
+-- Zielpunkt inkl. Vorhalt fuer ein Ziel-Root. Sprung/Fall: vertikalen Anteil rauslassen
+-- (sonst zielt der Vorhalt zu weit hoch), horizontaler Vorhalt bleibt.
+local function aimPointFor(origin, root, hum, speed)
+  local vel = root.AssemblyLinearVelocity
+  if hum then
+    local ok, st = pcall(function() return hum:GetState() end)
+    if ok and (st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.Freefall) then
+      vel = Vector3.new(vel.X, 0, vel.Z)
+    end
+  end
+  return leadPos(origin, root.Position, vel, speed)
+end
+
 --========================= Silent-Aim (Auto-Hit) =========================--
 local function startAim()
   if g.SB_AIM_LOOP then return end
@@ -383,28 +418,6 @@ local function startAim()
   local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
   if not (okM and pm) then g.SB_AIM_LOOP = false; return end
   local u13 = pm:GetMouse()
-  local okSpL, spellsL = pcall(function() return require(RS.shared.modules.spells) end)
-  local slist = okSpL and spellsL and (spellsL.list or spellsL) or nil
-  -- Projektilgeschwindigkeit des AKTUELL geladenen Spells automatisch ablesen
-  local function currentSpeed()
-    local refs = g.SB_REFS
-    local loaded = refs and refs.state and refs.state.loadedSpell
-    if loaded and slist and slist[loaded] and tonumber(slist[loaded].speed) then
-      g.SB_AIM_DETECTED, g.SB_AIM_DETSPELL = tonumber(slist[loaded].speed), loaded
-      return tonumber(slist[loaded].speed)
-    end
-    return tonumber(g.SB_AIM_PROJSPEED) or 250   -- Fallback wenn nichts geladen / kein Speed-Feld
-  end
-  -- Vorhalt: loese iterativ wo das Ziel bei Projektil-Ankunft ist (pos + vel * flugzeit)
-  local function leadPos(origin, pos, vel, speed)
-    if not speed or speed <= 0 or not vel then return pos end
-    local t = (pos - origin).Magnitude / speed
-    for _ = 1, 4 do
-      local p = pos + vel * t
-      t = (p - origin).Magnitude / speed
-    end
-    return pos + vel * t
-  end
   local aimConn = RunService.RenderStepped:Connect(function()
     if not g.SB_AIM then rawset(u13, "Hit", nil); return end
     -- Legitness: fuer kurze Fenster (~0.2s) den Aim ganz aussetzen -> so viel % der Shots gehen daneben
@@ -418,7 +431,7 @@ local function startAim()
     if not (cam and myHRP) then rawset(u13, "Hit", nil); return end
     local mp = UIS:GetMouseLocation()
     local origin = myHRP.Position
-    local speed = g.SB_AIM_PRED and currentSpeed() or 0
+    local speed = g.SB_AIM_PRED and spellSpeed() or 0
     local bestH, bestHum, bestScreen, bestName
     local function consider(char, name)
       if not char or (g.SB_AIM_EXEMPT and g.SB_AIM_EXEMPT[name]) then return end
@@ -454,16 +467,7 @@ local function startAim()
       end
     end
     if bestH then
-      local vel = bestH.AssemblyLinearVelocity
-      -- Sprung/Fall: vertikalen Anteil rauslassen (sonst zielt der Vorhalt zu weit hoch),
-      -- horizontaler Vorhalt bleibt. Anderes vertikales Movement bleibt erhalten.
-      if bestHum then
-        local ok, st = pcall(function() return bestHum:GetState() end)
-        if ok and (st == Enum.HumanoidStateType.Jumping or st == Enum.HumanoidStateType.Freefall) then
-          vel = Vector3.new(vel.X, 0, vel.Z)
-        end
-      end
-      local aimPos = leadPos(origin, bestH.Position, vel, speed)
+      local aimPos = aimPointFor(origin, bestH, bestHum, speed)
       rawset(u13, "Hit", CFrame.new(aimPos)); g.SB_AIM_TARGET = bestName
     else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil end
   end)
@@ -844,40 +848,96 @@ local function apparateTo(name)
 end
 
 --========================= Autofarm (Map weg + Untergrund-Hopping) =========================--
--- Ablauf pro Runde: Map lokal loeschen -> unter den naechsten Spieler teleportieren ->
--- EINEN Spell nach oben feuern -> naechster Spieler.
+-- Ablauf pro Runde: Map lokal wegraeumen -> unter den naechsten Spieler teleportieren ->
+-- dort EINEN Spell mit Silent-Aim nach oben feuern -> naechster Spieler.
 -- Aus dem Spiel geprueft: ALLE Charaktere haengen in Workspace.Terrain.characters, die
 -- Spell-Effekte in Terrain.effects/shields/protegos -> alles was direkt unter Workspace
--- haengt ist reine Map und kann gefahrlos zerstoert werden (Spieler/Effekte bleiben).
--- Der Boden ist echtes Terrain-Voxel, deshalb zusaetzlich Terrain:Clear() - sonst blockt
--- der Boden Sicht und Projektil, wenn von unten gefeuert wird.
--- Ohne Boden faellt man sofort ins Nichts -> das HRP wird waehrend des Farmens verankert
--- und beim Ausschalten wieder freigegeben (optional zurueck an die Startposition).
--- Alles rein clientseitig: der Server sieht nur Bewegung + normale Casts, ein Rejoin
--- stellt die Map wieder her.
+-- haengt ist reine Map und kann weg, ohne Spieler oder Effekte zu treffen.
+-- UMKEHRBAR: die Map wird NICHT zerstoert, sondern nur ausgehaengt (Parent = nil) und in
+-- g.SB_MAP_PARKED gemerkt -> "Map zurueckholen" haengt sie 1:1 wieder ein.
+-- Der Boden ist echtes Terrain-Voxel. Terrain:Clear() waere endgueltig (nur ein Rejoin
+-- holt es zurueck), deshalb wird standardmaessig pro Farm-Spot nur eine kleine Blase
+-- ausgeschnitten: vorher CopyRegion sichern, FillRegion(Air) schneiden, PasteRegion legt
+-- sie beim Restore wieder rein. Alles rein clientseitig.
 g.SB_FARM_SPELL = g.SB_FARM_SPELL or resolveSpell("avada kedavra")
 g.SB_FARM_DEPTH = tonumber(g.SB_FARM_DEPTH) or 15     -- Studs unter dem Ziel
 g.SB_FARM_DELAY = tonumber(g.SB_FARM_DELAY) or 0.25   -- Wartezeit nach dem TP vor dem Cast
 g.SB_FARM_ROUND = tonumber(g.SB_FARM_ROUND) or 0.5    -- Pause zwischen zwei Runden
-if g.SB_FARM_NUKE         == nil then g.SB_FARM_NUKE = true end          -- Map beim Start loeschen
-if g.SB_FARM_CLEARTERRAIN == nil then g.SB_FARM_CLEARTERRAIN = true end  -- Terrain-Voxel mitloeschen
+if g.SB_FARM_NUKE         == nil then g.SB_FARM_NUKE = true end          -- Map beim Start wegraeumen
+if g.SB_FARM_UNNUKE       == nil then g.SB_FARM_UNNUKE = true end        -- beim Stoppen zurueckholen
+if g.SB_FARM_CARVE        == nil then g.SB_FARM_CARVE = true end         -- Terrain-Blase (umkehrbar)
+if g.SB_FARM_WIPE_TERRAIN == nil then g.SB_FARM_WIPE_TERRAIN = false end -- Terrain global (endgueltig)
 if g.SB_FARM_EXEMPT_OK    == nil then g.SB_FARM_EXEMPT_OK = true end     -- Aim-Ausnahmen beachten
+if g.SB_FARM_SKIP_SAFE    == nil then g.SB_FARM_SKIP_SAFE = true end     -- Safe-Zone-Spieler auslassen
 if g.SB_FARM_SKIP_STAFF   == nil then g.SB_FARM_SKIP_STAFF = true end    -- Moderatoren auslassen
 if g.SB_FARM_RETURN       == nil then g.SB_FARM_RETURN = true end        -- am Ende zurueck
 if g.SB_FARM_REPEAT       == nil then g.SB_FARM_REPEAT = true end        -- endlos rotieren
+g.SB_MAP_PARKED = g.SB_MAP_PARKED or {}   -- ausgehaengte Map-Teile: { {inst=, parent=} }
+g.SB_TERR_SNAP  = g.SB_TERR_SNAP  or {}   -- gesicherte Blasen: [key] = { reg=TerrainRegion, corner=Vector3int16 }
+local TERR_SNAP_MAX = 400                 -- Deckel, sonst waechst der Speicher endlos
 
--- Map lokal zerstoeren. Terrain + Camera + alles mit "_" (z.B. _Anchor) bleiben stehen.
-local function nukeMap(clearTerrain)
-  local killed = 0
+-- Map aushaengen statt zerstoeren -> jederzeit 1:1 wieder einhaengbar.
+-- Terrain (haelt die Charaktere), Camera und alles mit "_" (z.B. _Anchor) bleiben stehen.
+local function parkMap()
+  local n = 0
   for _, c in ipairs(workspace:GetChildren()) do
     if not c:IsA("Terrain") and not c:IsA("Camera") and c.Name:sub(1, 1) ~= "_" then
-      if pcall(function() c:Destroy() end) then killed = killed + 1 end
+      local par = c.Parent
+      if pcall(function() c.Parent = nil end) then
+        g.SB_MAP_PARKED[#g.SB_MAP_PARKED + 1] = { inst = c, parent = par }
+        n = n + 1
+      end
     end
   end
-  if clearTerrain then pcall(function() workspace.Terrain:Clear() end) end
-  g.SB_MAP_NUKED  = true
-  g.SB_MAP_KILLED = (tonumber(g.SB_MAP_KILLED) or 0) + killed
-  return killed
+  g.SB_MAP_NUKED = true
+  return n
+end
+
+-- Terrain-Blase um pos ausschneiden, vorher sichern (damit der Restore sie zurueckholt).
+local function carveTerrain(pos, radius)
+  local terr = workspace.Terrain
+  local r = math.max(1, math.floor(radius / 4))
+  local cx, cy, cz = math.floor(pos.X / 4), math.floor(pos.Y / 4), math.floor(pos.Z / 4)
+  local mn = Vector3int16.new(cx - r, cy - r, cz - r)
+  local mx = Vector3int16.new(cx + r, cy + r, cz + r)
+  local key = mn.X .. "," .. mn.Y .. "," .. mn.Z .. "/" .. r
+  if not g.SB_TERR_SNAP[key] then
+    if (tonumber(g.SB_TERR_COUNT) or 0) >= TERR_SNAP_MAX then
+      g.SB_TERR_TRUNC = true                       -- Deckel erreicht: ab hier ohne Sicherung
+    else
+      local ok, reg = pcall(function() return terr:CopyRegion(Region3int16.new(mn, mx)) end)
+      if ok and typeof(reg) == "Instance" then
+        g.SB_TERR_SNAP[key] = { reg = reg, corner = mn }
+        g.SB_TERR_COUNT = (tonumber(g.SB_TERR_COUNT) or 0) + 1
+      end
+    end
+  end
+  pcall(function()
+    terr:FillRegion(Region3.new(Vector3.new(mn.X * 4, mn.Y * 4, mn.Z * 4),
+                                Vector3.new((mx.X + 1) * 4, (mx.Y + 1) * 4, (mx.Z + 1) * 4)),
+                    4, Enum.Material.Air)
+  end)
+end
+
+-- Map + gesicherte Terrain-Blasen zurueckholen, ohne Rejoin.
+local function restoreMap()
+  local parts, bubbles = 0, 0
+  for _, e in ipairs(g.SB_MAP_PARKED) do
+    if e.inst and pcall(function() e.inst.Parent = e.parent or workspace end) then parts = parts + 1 end
+  end
+  g.SB_MAP_PARKED = {}
+  local terr = workspace.Terrain
+  for k, s in pairs(g.SB_TERR_SNAP) do
+    if s.reg then
+      if pcall(function() terr:PasteRegion(s.reg, s.corner, true) end) then bubbles = bubbles + 1 end
+      pcall(function() s.reg:Destroy() end)
+    end
+    g.SB_TERR_SNAP[k] = nil
+  end
+  g.SB_TERR_COUNT, g.SB_TERR_TRUNC = 0, false
+  g.SB_MAP_NUKED = false
+  g.SB_MAP_LAST  = parts .. "/" .. bubbles
+  return parts, bubbles
 end
 
 -- HRP holen und (waehrend des Farmens) verankern - ohne Boden faellt man sonst raus.
@@ -901,12 +961,21 @@ local function farmTeleport(pos)
   return true
 end
 
--- Ein Cast auf eine feste Position (ohne Mausklick): erst der echte WandClient-Pfad
--- (load -> fire), sonst der Packet-Fallback wie beim Appa.
-local function farmCast(targetPos)
+-- Ein Cast auf ein Ziel-Root (ohne Mausklick), MIT Silent-Aim: der Zielpunkt kommt aus
+-- derselben Lead-Rechnung wie beim Silent-Aim (aimPointFor) und wird zusaetzlich auf die
+-- Spiel-Maus gelegt, damit auch der interne Fire-Pfad genau dorthin zielt.
+local function farmCast(root, hum)
   if legitFail() then return false end             -- Legitness: Cast absichtlich verschlucken
-  local spell = resolveSpell(g.SB_FARM_SPELL or "avada kedavra")
-  local refs  = g.SB_REFS
+  local spell  = resolveSpell(g.SB_FARM_SPELL or "avada kedavra")
+  local refs   = g.SB_REFS
+  local myHRP  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  local origin = myHRP and myHRP.Position or root.Position
+  local function aimAt()                           -- nach dem Load: spellSpeed() kennt den Spell
+    return aimPointFor(origin, root, hum, g.SB_AIM_PRED and spellSpeed() or 0)
+  end
+  local function pushMouse(p)                      -- Silent-Aim-Override auf die Spiel-Maus
+    if g.SB_MOUSE then pcall(function() rawset(g.SB_MOUSE, "Hit", p and CFrame.new(p) or nil) end) end
+  end
   if refs and refs.set and refs.state and refs.fire then
     local st = refs.state
     st.casts = 0
@@ -914,7 +983,11 @@ local function farmCast(targetPos)
     task.wait(0.07)                                -- Server den Load registrieren lassen
     if st.loadedSpell == spell then
       st.casts = 0
-      if pcall(refs.fire, targetPos) then
+      local target = aimAt()
+      pushMouse(target)
+      local ok = pcall(refs.fire, target)
+      if not g.SB_AIM then pushMouse(nil) end      -- Override wieder freigeben (Silent-Aim ist aus)
+      if ok then
         g.SB_FARM_CASTS = (tonumber(g.SB_FARM_CASTS) or 0) + 1
         g.SB_CASTS      = (tonumber(g.SB_CASTS) or 0) + 1
         g.SB_LAST_CAST  = os.clock()
@@ -925,7 +998,7 @@ local function farmCast(targetPos)
   end
   local ch   = lp.Character
   local wand = ch and ch:FindFirstChildWhichIsA("Tool")
-  if wand and castReplicated(refs and refs.state or nil, wand, spell, targetPos) then
+  if wand and castReplicated(refs and refs.state or nil, wand, spell, aimAt()) then
     g.SB_FARM_CASTS = (tonumber(g.SB_FARM_CASTS) or 0) + 1
     g.SB_LAST_CAST  = os.clock()
     return true
@@ -933,8 +1006,8 @@ local function farmCast(targetPos)
   return false
 end
 
--- Zielliste: lebende Spieler, naechster zuerst; respektiert (optional) die Silent-Aim-
--- Ausnahmen inkl. Fraktions-Ausnahmen und Keep-Target-Override.
+-- Zielliste: lebende Spieler, naechster zuerst. Uebersprungen werden (je nach Option)
+-- Safe-Zone-Spieler (Attribut InSafeZone), Staff und die Silent-Aim-Ausnahmen.
 local function farmTargets()
   local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
   local me    = myHRP and myHRP.Position or Vector3.zero
@@ -951,6 +1024,7 @@ local function farmTargets()
           if g.SB_AIM_EXEMPT[pl.Name] then skip = true end
           if fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name] then skip = true end
         end
+        if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
         if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
         if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
       end
@@ -969,7 +1043,11 @@ local function startFarm()
   task.spawn(function()
     local hrp0 = farmHRP(false)
     g.SB_FARM_HOME = g.SB_FARM_HOME or (hrp0 and hrp0.CFrame)
-    if g.SB_FARM_NUKE and not g.SB_MAP_NUKED then nukeMap(g.SB_FARM_CLEARTERRAIN) end
+    if g.SB_FARM_NUKE and not g.SB_MAP_NUKED then parkMap() end
+    if g.SB_FARM_WIPE_TERRAIN and not g.SB_TERR_WIPED then
+      pcall(function() workspace.Terrain:Clear() end)
+      g.SB_TERR_WIPED = true                       -- global geloescht -> nur ein Rejoin holt das zurueck
+    end
     while g.SB_FARM do
       local targets = farmTargets()
       if #targets == 0 then
@@ -981,14 +1059,21 @@ local function startFarm()
           local ch   = pl.Character
           local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
           local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
-          if root and hum and hum.Health > 0 then
+          -- Safe-Zone kann sich waehrend der Runde aendern -> direkt vor dem Hop nochmal pruefen
+          local safe = g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true
+          if root and hum and hum.Health > 0 and not safe then
             g.SB_FARM_TARGET = pl.Name
             local depth = tonumber(g.SB_FARM_DEPTH) or 15
-            if farmTeleport(root.Position - Vector3.new(0, depth, 0)) then
+            local spot  = root.Position - Vector3.new(0, depth, 0)
+            if farmTeleport(spot) then
+              if g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
+                carveTerrain((spot + root.Position) * 0.5, depth * 0.5 + 14)
+              end
               task.wait(tonumber(g.SB_FARM_DELAY) or 0.25)
-              -- Ziel koennte inzwischen weg/tot sein -> frisch pruefen
-              if g.SB_FARM and root.Parent and hum.Health > 0 and not isStunnedOrBound() then
-                farmCast(root.Position)
+              -- Ziel koennte inzwischen weg/tot/in einer Safe Zone sein -> frisch pruefen
+              local stillSafe = g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true
+              if g.SB_FARM and root.Parent and hum.Health > 0 and not stillSafe and not isStunnedOrBound() then
+                farmCast(root, hum)
               end
             end
           end
@@ -998,7 +1083,9 @@ local function startFarm()
       end
       task.wait(tonumber(g.SB_FARM_ROUND) or 0.5)
     end
-    -- Aufraeumen: zurueck an den Startpunkt, dann entankern
+    -- Aufraeumen: erst Map/Terrain zurueck (sonst faellt man beim Entankern ins Nichts),
+    -- dann an den Startpunkt und entankern.
+    if g.SB_FARM_UNNUKE then pcall(restoreMap) end
     local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     if hrp then
       if g.SB_FARM_RETURN and g.SB_FARM_HOME then pcall(function() hrp.CFrame = g.SB_FARM_HOME end) end
@@ -1411,23 +1498,29 @@ local function mountGui()
         function(v) g.SB_FARM_DELAY = math.floor(v * 100 + 0.5) / 100 end, function(v) return string.format("%.2fs", v) end)
       makeSliderW(sf, 4, "Runden-Pause", 0, 5, function() return tonumber(g.SB_FARM_ROUND) or 0.5 end,
         function(v) g.SB_FARM_ROUND = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
-      makeToggleW(sf, 5, "Map loeschen beim Start", function() return g.SB_FARM_NUKE == true end,
-        function() g.SB_FARM_NUKE = not g.SB_FARM_NUKE end)
-      makeToggleW(sf, 6, "Terrain mitloeschen", function() return g.SB_FARM_CLEARTERRAIN == true end,
-        function() g.SB_FARM_CLEARTERRAIN = not g.SB_FARM_CLEARTERRAIN end)
-      makeToggleW(sf, 7, "Aim-Ausnahmen beachten", function() return g.SB_FARM_EXEMPT_OK == true end,
+      makeToggleW(sf, 5, "Safe Zones auslassen", function() return g.SB_FARM_SKIP_SAFE == true end,
+        function() g.SB_FARM_SKIP_SAFE = not g.SB_FARM_SKIP_SAFE end)
+      makeToggleW(sf, 6, "Aim-Ausnahmen beachten", function() return g.SB_FARM_EXEMPT_OK == true end,
         function() g.SB_FARM_EXEMPT_OK = not g.SB_FARM_EXEMPT_OK end)
-      makeToggleW(sf, 8, "Staff auslassen", function() return g.SB_FARM_SKIP_STAFF == true end,
+      makeToggleW(sf, 7, "Staff auslassen", function() return g.SB_FARM_SKIP_STAFF == true end,
         function() g.SB_FARM_SKIP_STAFF = not g.SB_FARM_SKIP_STAFF end)
-      makeToggleW(sf, 9, "Endlos wiederholen", function() return g.SB_FARM_REPEAT == true end,
+      makeToggleW(sf, 8, "Map wegraeumen beim Start", function() return g.SB_FARM_NUKE == true end,
+        function() g.SB_FARM_NUKE = not g.SB_FARM_NUKE end)
+      makeToggleW(sf, 9, "Map beim Stoppen zurueck", function() return g.SB_FARM_UNNUKE == true end,
+        function() g.SB_FARM_UNNUKE = not g.SB_FARM_UNNUKE end)
+      makeToggleW(sf, 10, "Terrain-Blase (umkehrbar)", function() return g.SB_FARM_CARVE == true end,
+        function() g.SB_FARM_CARVE = not g.SB_FARM_CARVE end)
+      makeToggleW(sf, 11, "Terrain global loeschen", function() return g.SB_FARM_WIPE_TERRAIN == true end,
+        function() g.SB_FARM_WIPE_TERRAIN = not g.SB_FARM_WIPE_TERRAIN end)
+      makeToggleW(sf, 12, "Endlos wiederholen", function() return g.SB_FARM_REPEAT == true end,
         function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
-      makeToggleW(sf, 10, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
+      makeToggleW(sf, 13, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
         function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
-      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 54); fi.LayoutOrder = 11
+      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 80); fi.LayoutOrder = 14
       fi.BackgroundTransparency = 1; fi.Font = Enum.Font.Gotham; fi.TextSize = 11
       fi.TextColor3 = Color3.fromRGB(150, 150, 170); fi.TextWrapped = true
       fi.TextXAlignment = Enum.TextXAlignment.Left
-      fi.Text = "Loescht die Map nur lokal (Rejoin holt sie zurueck), teleportiert unter jeden Spieler und feuert je einen Spell nach oben."
+      fi.Text = "Map wird nur ausgehaengt und ist per 'Map zurueckholen' wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder."
       fi.Parent = sf
     end)
 
@@ -1447,9 +1540,14 @@ local function mountGui()
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
   addAction(util, function()
-      return g.SB_MAP_NUKED and ("Map weg (" .. tostring(g.SB_MAP_KILLED or 0) .. ")") or "Map loeschen (lokal)"
+      return g.SB_MAP_NUKED and ("Map weg (" .. #g.SB_MAP_PARKED .. " Teile)") or "Map wegraeumen (lokal)"
     end,
-    function() nukeMap(g.SB_FARM_CLEARTERRAIN) end)
+    function() parkMap() end)
+  addAction(util, function()
+      if g.SB_TERR_WIPED then return "Map zurueckholen (Terrain: Rejoin)" end
+      return g.SB_MAP_LAST and ("Map zurueckgeholt (" .. tostring(g.SB_MAP_LAST) .. ")") or "Map zurueckholen"
+    end,
+    function() restoreMap() end)
   addModule(util, "Box-ESP",
     function() return g.SB_TEAM_ESP end,
     function(v) g.SB_TEAM_ESP = v; if v then startVisuals() end end)
