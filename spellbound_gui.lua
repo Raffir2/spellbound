@@ -3,19 +3,21 @@
 --       Spell -> jeder deiner Klicks feuert ihn ohne Cooldown (echte Hits). Auswaehlbar.
 --   COMBO: nach JEDEM Auto-Spell-Fire wird einmal der gewaehlte Combo-Spell equippt
 --       + gecastet, danach sofort wieder der Auto-Spell scharf. Toggle + auswaehlbar.
---   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
+--   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor. Die Trefferzone
+--       wechselt dabei (Torso/Kopf/Gliedmassen + Offset), damit es nicht nach Bot aussieht.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
 --   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
 --       Abstand) aus den eigenen Bind-Sets, alphabetisch rotierend.
---   SNIPE (M): Tarnschuss aufs Silent-Aim-Ziel, punktgenau zum Einschlag TP unter das Ziel,
+--   SNIPE (E): Tarnschuss aufs Silent-Aim-Ziel, punktgenau zum Einschlag TP unter das Ziel,
 --       zweiter Spell von unten, sofort zurueck auf den Startpunkt.
---   AUTOFARM (K): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
+--   AUTOFARM (Farm-Panel): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
 --       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
---   KD-FARM (J): killt dich per resetEvent im Dauertakt (~3.3s pro Tod) und haelt so die K/D unten.
+--   KD-FARM (Farm-Panel): killt dich per resetEvent im Dauertakt (~3.9s pro Tod), haelt die K/D unten.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
 --   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H-Hotkeys entfernt;
---   P=Clash, C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
+--   P=Clash, C=Dodge, T=Apparate, G=Appa-laden, E=Snipe bleiben als Aktions-Hotkeys.
+--   Autofarm und KD-Farm haben BEWUSST keinen Hotkey - nur ueber das Farm-Panel schaltbar.
 -- Standalone, per Autoexec ladbar. Cooldown wird durchgehend ueber casts=0 umgangen.
 
 pcall(setthreadidentity, 2)
@@ -508,6 +510,43 @@ local function aimPointFor(origin, root, hum, speed)
   return leadPos(origin, root.Position, vel, speed)
 end
 
+--========================= Trefferzone (nicht immer der Torso) =========================--
+-- Silent-Aim zielte bisher immer auf HumanoidRootPart, also exakt Brustmitte - das sieht in
+-- Aufnahmen sofort nach Bot aus. Jetzt wird pro Ziel eine Koerperzone gewichtet gewuerfelt
+-- (Torso oft, Kopf/Gliedmassen seltener), dazu ein Zufalls-Offset innerhalb des Teils, und
+-- die Wahl bleibt SB_AIM_ZONEROLL Sekunden stehen (sonst zappelt der Zielpunkt pro Frame).
+-- Funktioniert fuer R15 und R6: es werden nur real vorhandene Teile gezogen.
+if g.SB_AIM_ZONES == nil then g.SB_AIM_ZONES = true end
+g.SB_AIM_ZONEROLL = tonumber(g.SB_AIM_ZONEROLL) or 1.2
+g.SB_AIM_ZONE = {}                                  -- [Charaktername] = { part, off, expires }
+local AIM_ZONES = {
+  { "HumanoidRootPart", 24 }, { "UpperTorso", 20 }, { "Torso", 20 }, { "LowerTorso", 14 },
+  { "Head", 12 }, { "LeftUpperArm", 5 }, { "RightUpperArm", 5 }, { "Left Arm", 5 }, { "Right Arm", 5 },
+  { "LeftUpperLeg", 4 }, { "RightUpperLeg", 4 }, { "Left Leg", 4 }, { "Right Leg", 4 },
+}
+local zoneRng = Random.new()
+local function aimZone(char, root)
+  if not g.SB_AIM_ZONES or not char then return root, Vector3.zero end
+  local z = g.SB_AIM_ZONE[char.Name]
+  if z and z.expires > os.clock() and z.part and z.part.Parent then return z.part, z.off end
+  local pool, total = {}, 0
+  for _, e in ipairs(AIM_ZONES) do
+    local part = char:FindFirstChild(e[1])
+    if part and part:IsA("BasePart") then total = total + e[2]; pool[#pool + 1] = { part, total } end
+  end
+  if total <= 0 then return root, Vector3.zero end
+  local roll = zoneRng:NextNumber(0, total)
+  local pick = pool[#pool][1]
+  for _, e in ipairs(pool) do if roll <= e[2] then pick = e[1]; break end end
+  local half = pick.Size * 0.35                     -- nie exakt der Mittelpunkt
+  local off = Vector3.new(zoneRng:NextNumber(-half.X, half.X),
+                          zoneRng:NextNumber(-half.Y, half.Y),
+                          zoneRng:NextNumber(-half.Z, half.Z))
+  g.SB_AIM_ZONE[char.Name] = { part = pick, off = off,
+                               expires = os.clock() + (tonumber(g.SB_AIM_ZONEROLL) or 1.2) }
+  return pick, off
+end
+
 --========================= Silent-Aim (Auto-Hit) =========================--
 local function startAim()
   if g.SB_AIM_LOOP then return end
@@ -529,7 +568,7 @@ local function startAim()
     local mp = UIS:GetMouseLocation()
     local origin = myHRP.Position
     local speed = g.SB_AIM_PRED and spellSpeed() or 0
-    local bestH, bestHum, bestScreen, bestName
+    local bestH, bestHum, bestScreen, bestName, bestChar
     local function consider(char, name)
       if not char or (g.SB_AIM_EXEMPT and g.SB_AIM_EXEMPT[name]) then return end
       local h  = char:FindFirstChild("HumanoidRootPart")
@@ -540,7 +579,7 @@ local function startAim()
       local sd = (Vector2.new(sp.X, sp.Y) - Vector2.new(mp.X, mp.Y)).Magnitude
       local wd = (h.Position - origin).Magnitude
       if sd <= g.SB_AIM_FOV and wd <= g.SB_AIM_RANGE and (not bestScreen or sd < bestScreen) then
-        bestH, bestHum, bestScreen, bestName = h, hu, sd, name
+        bestH, bestHum, bestScreen, bestName, bestChar = h, hu, sd, name, char
       end
     end
     for _, pl in ipairs(Players:GetPlayers()) do
@@ -565,7 +604,8 @@ local function startAim()
       end
     end
     if bestH then
-      local aimPos = aimPointFor(origin, bestH, bestHum, speed)
+      local zonePart, zoneOff = aimZone(bestChar, bestH)     -- mal Kopf, mal Arm, mal Torso
+      local aimPos = aimPointFor(origin, zonePart, bestHum, speed) + zoneOff
       rawset(u13, "Hit", CFrame.new(aimPos)); g.SB_AIM_TARGET = bestName
     else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil end
   end)
@@ -1086,7 +1126,8 @@ local function farmCast(root, hum, spellOverride)
   local myHRP  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
   local origin = myHRP and myHRP.Position or root.Position
   local function aimAt()                           -- nach dem Load: spellSpeed() kennt den Spell
-    return aimPointFor(origin, root, hum, g.SB_AIM_PRED and spellSpeed() or 0)
+    local zonePart, zoneOff = aimZone(root.Parent, root)   -- Trefferzone variieren
+    return aimPointFor(origin, zonePart, hum, g.SB_AIM_PRED and spellSpeed() or 0) + zoneOff
   end
   local function pushMouse(p)                      -- Silent-Aim-Override auf die Spiel-Maus
     if g.SB_MOUSE then pcall(function() rawset(g.SB_MOUSE, "Hit", p and CFrame.new(p) or nil) end) end
@@ -1631,31 +1672,53 @@ local function mountGui()
   gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
   gui.IgnoreGuiInset = true; gui.DisplayOrder = 9999; gui.Parent = parent
 
-  -- === Theme (Phobos/Future: gruener Header, aktiv = ganz gruen, scharfe Ecken) ===
-  local ACCENT  = Color3.fromRGB(95, 205, 90)     -- Phobos-Gruen (Header + aktives Modul)
-  local ACCENT2 = Color3.fromRGB(95, 205, 90)
-  local ENABLED = Color3.fromRGB(95, 205, 90)
-  local DARKTXT = Color3.fromRGB(10, 16, 10)      -- dunkler Text auf Gruen
-  local PANEL_BG= Color3.fromRGB(10, 11, 14)
-  local HEAD_BG = ACCENT
-  local ROW_OFF = Color3.fromRGB(15, 15, 19)
-  local ROW_ON  = ACCENT
-  local TXT_OFF = Color3.fromRGB(188, 188, 194)
-  local function corner(o) local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, 0); return c end
+  -- === Theme (Phobos/Future: gruen, scharfe Ecken, aber mit Hover/Tiefe/Anim) ===
+  local TW       = game:GetService("TweenService")
+  local ACCENT   = Color3.fromRGB(95, 205, 90)     -- Phobos-Gruen (Header + aktives Modul)
+  local ACCENT_D = Color3.fromRGB(58, 148, 58)     -- dunkleres Gruen fuer Verlauf/Stripe
+  local DARKTXT  = Color3.fromRGB(8, 16, 8)        -- dunkler Text auf Gruen
+  local PANEL_BG = Color3.fromRGB(13, 14, 17)
+  local SET_BG   = Color3.fromRGB(17, 18, 22)      -- Einstellungs-Container
+  local ROW_OFF  = Color3.fromRGB(19, 20, 24)
+  local ROW_HOV  = Color3.fromRGB(30, 32, 38)
+  local ROW_ON   = ACCENT
+  local TXT      = Color3.fromRGB(198, 200, 206)
+  local TXT_DIM  = Color3.fromRGB(122, 126, 134)
+  local WIDGET   = Color3.fromRGB(26, 28, 34)
+  local WIDGET_H = Color3.fromRGB(34, 37, 44)
+  local TRACK    = Color3.fromRGB(44, 47, 55)
+  local ROW_H    = 20                              -- Zeilenhoehe (vorher 18: zu eng)
+  local function corner(o, r)                      -- r=0 -> scharfe Phobos-Ecke
+    local c = Instance.new("UICorner", o); c.CornerRadius = UDim.new(0, r or 0); return c
+  end
+  local function stroke(o, col, tr)
+    local s = Instance.new("UIStroke", o); s.Color = col or Color3.fromRGB(0, 0, 0)
+    s.Transparency = tr or 0.55; s.Thickness = 1
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border; return s
+  end
+  local function tween(o, t, props)
+    return TW:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
+  end
 
   local openList                 -- offenes Dropdown (nur eins gleichzeitig)
-  local moduleRefs = {}          -- Modul-Zeilen fuer Farb-Refresh
+  local moduleRefs = {}          -- Modul-Zeilen fuer Farb-/Text-Refresh
   local function closeList() if openList then openList:Destroy(); openList = nil end end
 
   -- === Dim-Overlay (ClickGUI-Wurzel, per RechtsShift ein/aus) ===
   local clickRoot = Instance.new("Frame")
   clickRoot.Size = UDim2.fromScale(1, 1); clickRoot.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-  clickRoot.BackgroundTransparency = 0.4; clickRoot.BorderSizePixel = 0
+  clickRoot.BackgroundTransparency = 1; clickRoot.BorderSizePixel = 0
   clickRoot.Active = true; clickRoot.Visible = false; clickRoot.Parent = gui
   local guiOpen = false
   local function setOpen(v)
     guiOpen = v; g.SB_GUI_OPEN = v          -- Shotgun feuert nicht bei Klicks im ClickGUI
-    clickRoot.Visible = v; if not v then closeList() end
+    if v then
+      clickRoot.Visible = true
+      clickRoot.BackgroundTransparency = 1
+      tween(clickRoot, 0.12, { BackgroundTransparency = 0.45 })   -- weich abdunkeln
+    else
+      closeList(); clickRoot.Visible = false
+    end
   end
   g.SB_GUI_OPEN = false
   -- Streamproof: blendet ALLE Visuals aus, bis erneut gedrueckt (Hotkey: Bild-Ab / PageDown).
@@ -1670,7 +1733,7 @@ local function mountGui()
   clickRoot.InputBegan:Connect(function(i)
     if i.UserInputType == Enum.UserInputType.MouseButton1 then closeList() end   -- Klick ins Leere schliesst Liste
   end)
-  -- Alles laeuft in einem skalierten Host -> min. 3x groesser ueber EINEN Regler
+  -- Alles laeuft in einem skalierten Host -> Groesse ueber EINEN Regler
   local UI_SCALE = 2.3
   local panelHost = Instance.new("Frame")
   panelHost.Size = UDim2.fromScale(1, 1); panelHost.BackgroundTransparency = 1
@@ -1678,34 +1741,70 @@ local function mountGui()
   Instance.new("UIScale", panelHost).Scale = UI_SCALE
 
   -- === Einstellungs-Widgets ===
+  -- Pill-Schalter mit gleitendem Knopf statt Kaestchen.
   local function makeToggleW(parent, ord, label, get, set)
     local r = Instance.new("TextButton")
-    r.Size = UDim2.new(1, -12, 0, 22); r.LayoutOrder = ord; r.AutoButtonColor = false
-    r.BackgroundColor3 = Color3.fromRGB(28, 28, 40); r.BorderSizePixel = 0
-    r.Font = Enum.Font.Gotham; r.TextSize = 12; r.TextXAlignment = Enum.TextXAlignment.Left
-    r.Text = "  " .. label; r.TextColor3 = TXT_OFF; r.Parent = parent; corner(r, 4)
-    local box = Instance.new("Frame"); box.Size = UDim2.fromOffset(14, 14)
-    box.Position = UDim2.new(1, -20, 0.5, -7); box.BorderSizePixel = 0; box.Parent = r; corner(box, 3)
-    local function paint() box.BackgroundColor3 = get() and ACCENT or Color3.fromRGB(60, 60, 78) end
-    paint()
-    r.MouseButton1Click:Connect(function() set(not get()); paint() end)
+    r.Size = UDim2.new(1, -10, 0, 20); r.LayoutOrder = ord; r.AutoButtonColor = false
+    r.BackgroundColor3 = WIDGET; r.BorderSizePixel = 0
+    r.Font = Enum.Font.Gotham; r.TextSize = 11; r.TextXAlignment = Enum.TextXAlignment.Left
+    r.Text = "  " .. label; r.TextTruncate = Enum.TextTruncate.AtEnd
+    r.TextColor3 = TXT_DIM; r.Parent = parent; corner(r, 2)
+    local track = Instance.new("Frame"); track.Size = UDim2.fromOffset(20, 10)
+    track.Position = UDim2.new(1, -26, 0.5, -5); track.BorderSizePixel = 0
+    track.BackgroundColor3 = TRACK; track.Parent = r; corner(track, 5)
+    local knob = Instance.new("Frame"); knob.Size = UDim2.fromOffset(8, 8)
+    knob.Position = UDim2.fromOffset(1, 1); knob.BorderSizePixel = 0
+    knob.BackgroundColor3 = Color3.fromRGB(150, 154, 162); knob.Parent = track; corner(knob, 4)
+    local hovered = false
+    local function paint(anim)
+      local on = get() and true or false
+      local kp = UDim2.fromOffset(on and 11 or 1, 1)
+      if anim then
+        tween(knob, 0.12, { Position = kp, BackgroundColor3 = on and DARKTXT or Color3.fromRGB(150, 154, 162) })
+        tween(track, 0.12, { BackgroundColor3 = on and ACCENT or TRACK })
+      else
+        knob.Position = kp
+        knob.BackgroundColor3 = on and DARKTXT or Color3.fromRGB(150, 154, 162)
+        track.BackgroundColor3 = on and ACCENT or TRACK
+      end
+      r.TextColor3 = on and TXT or TXT_DIM
+      r.BackgroundColor3 = hovered and WIDGET_H or WIDGET
+    end
+    paint(false)
+    r.MouseEnter:Connect(function() hovered = true; paint(false) end)
+    r.MouseLeave:Connect(function() hovered = false; paint(false) end)
+    r.MouseButton1Click:Connect(function() set(not get()); paint(true) end)
+    moduleRefs[#moduleRefs + 1] = function() if r.Parent then paint(false) end end
   end
 
+  -- Slider mit Knopf, Wert rechts im Label und Klick/Drag auf der ganzen Zeile.
   local function makeSliderW(parent, ord, label, mn, mx, get, set, fmt)
-    local holder = Instance.new("Frame"); holder.Size = UDim2.new(1, -12, 0, 34)
-    holder.LayoutOrder = ord; holder.BackgroundTransparency = 1; holder.Parent = parent
-    local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1, 0, 0, 16)
-    lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.Gotham; lbl.TextSize = 12
-    lbl.TextColor3 = Color3.fromRGB(210, 210, 225); lbl.TextXAlignment = Enum.TextXAlignment.Left
-    lbl.Parent = holder
-    local track = Instance.new("Frame"); track.Size = UDim2.new(1, 0, 0, 8)
-    track.Position = UDim2.fromOffset(0, 20); track.BackgroundColor3 = Color3.fromRGB(44, 44, 60)
-    track.BorderSizePixel = 0; track.Active = true; track.Parent = holder; corner(track, 4)
+    local holder = Instance.new("Frame"); holder.Size = UDim2.new(1, -10, 0, 32)
+    holder.LayoutOrder = ord; holder.BackgroundColor3 = WIDGET; holder.BorderSizePixel = 0
+    holder.Parent = parent; corner(holder, 2)
+    local pad = Instance.new("UIPadding", holder)
+    pad.PaddingLeft = UDim.new(0, 6); pad.PaddingRight = UDim.new(0, 6); pad.PaddingTop = UDim.new(0, 3)
+    local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1, 0, 0, 13)
+    lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.Gotham; lbl.TextSize = 11
+    lbl.TextColor3 = TXT_DIM; lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Text = label; lbl.Parent = holder
+    local val = Instance.new("TextLabel"); val.Size = UDim2.new(0, 60, 0, 13)
+    val.Position = UDim2.new(1, -60, 0, 0); val.BackgroundTransparency = 1
+    val.Font = Enum.Font.GothamBold; val.TextSize = 11; val.TextColor3 = ACCENT
+    val.TextXAlignment = Enum.TextXAlignment.Right; val.Parent = holder
+    local track = Instance.new("Frame"); track.Size = UDim2.new(1, 0, 0, 5)
+    track.Position = UDim2.fromOffset(0, 18); track.BackgroundColor3 = TRACK
+    track.BorderSizePixel = 0; track.Active = true; track.Parent = holder; corner(track, 3)
     local fill = Instance.new("Frame"); fill.BackgroundColor3 = ACCENT; fill.BorderSizePixel = 0
-    fill.Parent = track; corner(fill, 4)
+    fill.Size = UDim2.new(0, 0, 1, 0); fill.Parent = track; corner(fill, 3)
+    local knob = Instance.new("Frame"); knob.Size = UDim2.fromOffset(9, 9); knob.AnchorPoint = Vector2.new(0.5, 0.5)
+    knob.Position = UDim2.new(0, 0, 0.5, 0); knob.BackgroundColor3 = Color3.fromRGB(240, 245, 240)
+    knob.BorderSizePixel = 0; knob.ZIndex = 3; knob.Parent = track; corner(knob, 5)
     local function upd()
-      lbl.Text = label .. ": " .. fmt(get())
-      fill.Size = UDim2.new(math.clamp((get() - mn) / (mx - mn), 0, 1), 0, 1, 0)
+      local a = math.clamp((get() - mn) / (mx - mn), 0, 1)
+      val.Text = fmt(get())
+      fill.Size = UDim2.new(a, 0, 1, 0)
+      knob.Position = UDim2.new(a, 0, 0.5, 0)
     end
     upd()
     local dragging = false
@@ -1713,46 +1812,80 @@ local function mountGui()
       local rel = math.clamp((px - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
       set(mn + rel * (mx - mn)); upd()
     end
-    track.InputBegan:Connect(function(i)
+    local function grab(i)
       if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-        dragging = true; setFrom(i.Position.X)
+        dragging = true; setFrom(i.Position.X); tween(knob, 0.1, { Size = UDim2.fromOffset(12, 12) })
       end
-    end)
+    end
+    track.InputBegan:Connect(grab)
+    holder.InputBegan:Connect(grab)                 -- ganze Zeile ist Greiflaeche
+    holder.MouseEnter:Connect(function() holder.BackgroundColor3 = WIDGET_H end)
+    holder.MouseLeave:Connect(function() holder.BackgroundColor3 = WIDGET end)
     table.insert(g.SB_CONNS, UIS.InputChanged:Connect(function(i)
       if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then setFrom(i.Position.X) end
     end))
     table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
-      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
+      if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        if dragging then tween(knob, 0.1, { Size = UDim2.fromOffset(9, 9) }) end
+        dragging = false
+      end
     end))
+    moduleRefs[#moduleRefs + 1] = function() if holder.Parent and not dragging then upd() end end
   end
 
   local function makeDropdownW(parent, ord, labelFn, itemsFn, onPick)
     local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -12, 0, 22); btn.LayoutOrder = ord; btn.AutoButtonColor = false
-    btn.BackgroundColor3 = Color3.fromRGB(34, 30, 50); btn.BorderSizePixel = 0
-    btn.Font = Enum.Font.Gotham; btn.TextSize = 12; btn.TextXAlignment = Enum.TextXAlignment.Left
-    btn.TextColor3 = Color3.fromRGB(215, 210, 235); btn.Text = "  " .. labelFn(); btn.Parent = parent; corner(btn, 4)
+    btn.Size = UDim2.new(1, -10, 0, 20); btn.LayoutOrder = ord; btn.AutoButtonColor = false
+    btn.BackgroundColor3 = WIDGET; btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.Gotham; btn.TextSize = 11; btn.TextXAlignment = Enum.TextXAlignment.Left
+    btn.TextColor3 = TXT; btn.Text = "  " .. labelFn(); btn.TextTruncate = Enum.TextTruncate.AtEnd
+    btn.Parent = parent; corner(btn, 2)
+    local chev = Instance.new("TextLabel"); chev.Size = UDim2.fromOffset(14, 20)
+    chev.Position = UDim2.new(1, -16, 0, 0); chev.BackgroundTransparency = 1
+    chev.Font = Enum.Font.GothamBold; chev.TextSize = 10; chev.TextColor3 = ACCENT
+    chev.Text = "\xe2\x96\xbc"; chev.Parent = btn
+    btn.MouseEnter:Connect(function() btn.BackgroundColor3 = WIDGET_H end)
+    btn.MouseLeave:Connect(function() btn.BackgroundColor3 = WIDGET end)
     btn.MouseButton1Click:Connect(function()
+      local wasOpen = openList
       closeList()
+      if wasOpen then return end                       -- zweiter Klick schliesst nur
       local items = itemsFn()
       local sf = Instance.new("ScrollingFrame")
       -- panelHost ist um UI_SCALE skaliert -> in Host-lokalen (unskalierten) Koordinaten setzen
       local baseW = btn.AbsoluteSize.X / UI_SCALE
-      sf.Size = UDim2.fromOffset(math.max(baseW, 110), math.min(math.max(#items, 1) * 22, 150))
+      sf.Size = UDim2.fromOffset(math.max(baseW, 110), math.min(math.max(#items, 1) * 20, 160))
       sf.Position = UDim2.fromOffset(btn.AbsolutePosition.X / UI_SCALE, (btn.AbsolutePosition.Y + btn.AbsoluteSize.Y) / UI_SCALE + 2)
-      sf.BackgroundColor3 = Color3.fromRGB(18, 18, 22); sf.BorderSizePixel = 0
-      sf.ScrollBarThickness = 4; sf.CanvasSize = UDim2.fromOffset(0, #items * 22)
-      sf.ZIndex = 60; sf.Parent = panelHost; corner(sf)
+      sf.BackgroundColor3 = Color3.fromRGB(14, 15, 18); sf.BorderSizePixel = 0
+      sf.ScrollBarThickness = 3; sf.ScrollBarImageColor3 = ACCENT
+      sf.CanvasSize = UDim2.fromOffset(0, #items * 20)
+      sf.ZIndex = 60; sf.Parent = panelHost; corner(sf, 2); stroke(sf, Color3.fromRGB(0, 0, 0), 0.35)
       local lay = Instance.new("UIListLayout", sf); lay.SortOrder = Enum.SortOrder.LayoutOrder
+      local cur = labelFn()
       for _, name in ipairs(items) do
         local it = Instance.new("TextButton")
-        it.Size = UDim2.new(1, 0, 0, 22); it.BackgroundColor3 = Color3.fromRGB(32, 32, 46)
-        it.BorderSizePixel = 0; it.Font = Enum.Font.Gotham; it.TextSize = 12
-        it.TextColor3 = Color3.fromRGB(220, 214, 240); it.Text = name; it.ZIndex = 61; it.Parent = sf
+        it.Size = UDim2.new(1, 0, 0, 20); it.BackgroundColor3 = Color3.fromRGB(20, 21, 26)
+        it.BorderSizePixel = 0; it.Font = Enum.Font.Gotham; it.TextSize = 11
+        it.AutoButtonColor = false; it.TextXAlignment = Enum.TextXAlignment.Left
+        it.Text = "  " .. name; it.ZIndex = 61; it.Parent = sf
+        local picked = cur:find(name, 1, true) ~= nil
+        it.TextColor3 = picked and ACCENT or Color3.fromRGB(205, 208, 215)
+        it.MouseEnter:Connect(function() it.BackgroundColor3 = Color3.fromRGB(32, 35, 41) end)
+        it.MouseLeave:Connect(function() it.BackgroundColor3 = Color3.fromRGB(20, 21, 26) end)
         it.MouseButton1Click:Connect(function() onPick(name); btn.Text = "  " .. labelFn(); closeList() end)
       end
       openList = sf
     end)
+    moduleRefs[#moduleRefs + 1] = function() if btn.Parent then btn.Text = "  " .. labelFn() end end
+  end
+
+  -- Ueberschrift innerhalb eines Einstellungs-Blocks
+  local function makeHeadingW(parent, ord, text, col)
+    local l = Instance.new("TextLabel"); l.Size = UDim2.new(1, -10, 0, 15); l.LayoutOrder = ord
+    l.BackgroundTransparency = 1; l.Font = Enum.Font.GothamBold; l.TextSize = 10
+    l.TextColor3 = col or Color3.fromRGB(140, 144, 152); l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Text = string.upper(text); l.Parent = parent
+    return l
   end
 
   -- Inline-Spielerliste (z.B. Aim-Ausnahmen): scrollbare Haekchen pro Spieler
@@ -1761,48 +1894,63 @@ local function mountGui()
     for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
     table.sort(others, function(a, b) return a.Name:lower() < b.Name:lower() end)
     if #others == 0 then
-      local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -12, 0, 18)
+      local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -10, 0, 18)
       none.LayoutOrder = ord; none.BackgroundTransparency = 1; none.Font = Enum.Font.Gotham
-      none.TextSize = 11; none.TextColor3 = Color3.fromRGB(150, 150, 165)
-      none.Text = "keine anderen Spieler"; none.Parent = parent; return
+      none.TextSize = 11; none.TextColor3 = TXT_DIM; none.TextXAlignment = Enum.TextXAlignment.Left
+      none.Text = "  keine anderen Spieler"; none.Parent = parent; return
     end
     -- Scrollbarer Container: max MAXROWS Zeilen sichtbar, der Rest wird gescrollt
-    local ROW, MAXROWS = 22, 6
+    local ROW, MAXROWS = 23, 6
     local box = Instance.new("ScrollingFrame")
     box.Size = UDim2.new(1, 0, 0, math.min(#others, MAXROWS) * ROW)
     box.LayoutOrder = ord; box.BackgroundTransparency = 1; box.BorderSizePixel = 0
-    box.ScrollBarThickness = 4; box.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
+    box.ScrollBarThickness = 3; box.ScrollBarImageColor3 = ACCENT
     box.CanvasSize = UDim2.fromOffset(0, #others * ROW)
     box.ScrollingDirection = Enum.ScrollingDirection.Y; box.Parent = parent
     local lay = Instance.new("UIListLayout", box); lay.SortOrder = Enum.SortOrder.LayoutOrder
+    lay.Padding = UDim.new(0, 3); lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
     for idx, pl in ipairs(others) do
       makeToggleW(box, idx, pl.Name, function() return isOn(pl.Name) end, function() onToggle(pl.Name) end)
     end
   end
 
   -- === Panel (Kategorie) ===
-  local PANEL_W = 120
+  local PANEL_W = 132
   local function makePanel(title, px, py)
     local panel = Instance.new("Frame")
     panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
     panel.Position = UDim2.fromOffset(px, py); panel.BackgroundColor3 = PANEL_BG
-    panel.BackgroundTransparency = 0.05; panel.BorderSizePixel = 0; panel.Active = true
-    panel.Parent = panelHost; corner(panel)
+    panel.BackgroundTransparency = 0.02; panel.BorderSizePixel = 0; panel.Active = true
+    panel.Parent = panelHost; corner(panel, 0); stroke(panel, Color3.fromRGB(0, 0, 0), 0.35)
     local plist = Instance.new("UIListLayout", panel); plist.SortOrder = Enum.SortOrder.LayoutOrder
+    -- Header mit Verlauf + Drag + Einklappen
     local head = Instance.new("TextLabel")
-    head.Size = UDim2.new(1, 0, 0, 19); head.LayoutOrder = 0; head.BackgroundColor3 = HEAD_BG
+    head.Size = UDim2.new(1, 0, 0, 21); head.LayoutOrder = 0; head.BackgroundColor3 = ACCENT
     head.BorderSizePixel = 0; head.Font = Enum.Font.GothamBold; head.TextSize = 12
     head.TextColor3 = DARKTXT; head.TextXAlignment = Enum.TextXAlignment.Left
-    head.Text = "  " .. title; head.Active = true; head.Parent = panel; corner(head)
-    local hmark = Instance.new("TextLabel"); hmark.Size = UDim2.fromOffset(16, 19)
-    hmark.Position = UDim2.new(1, -16, 0, 0); hmark.BackgroundTransparency = 1
-    hmark.Font = Enum.Font.GothamBold; hmark.TextSize = 12; hmark.TextColor3 = DARKTXT
-    hmark.Text = "-"; hmark.Parent = head
+    head.Text = "   " .. title; head.Active = true; head.Parent = panel
+    local hg = Instance.new("UIGradient", head)
+    hg.Color = ColorSequence.new(ACCENT, ACCENT_D); hg.Rotation = 90
+    local stripe = Instance.new("Frame"); stripe.Size = UDim2.new(0, 3, 1, 0)
+    stripe.BackgroundColor3 = Color3.fromRGB(245, 255, 245); stripe.BackgroundTransparency = 0.55
+    stripe.BorderSizePixel = 0; stripe.Parent = head
+    local hmark = Instance.new("TextButton"); hmark.Size = UDim2.fromOffset(18, 21)
+    hmark.Position = UDim2.new(1, -18, 0, 0); hmark.BackgroundTransparency = 1
+    hmark.Font = Enum.Font.GothamBold; hmark.TextSize = 13; hmark.TextColor3 = DARKTXT
+    hmark.AutoButtonColor = false; hmark.Text = "\xe2\x80\x93"; hmark.Parent = head
     local body = Instance.new("Frame"); body.BackgroundTransparency = 1
     body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
     body.LayoutOrder = 1; body.Parent = panel
     local bl = Instance.new("UIListLayout", body); bl.SortOrder = Enum.SortOrder.LayoutOrder
-    local bp = Instance.new("UIPadding", body); bp.PaddingTop = UDim.new(0, 1); bp.PaddingBottom = UDim.new(0, 2)
+    bl.Padding = UDim.new(0, 1)
+    local bp = Instance.new("UIPadding", body)
+    bp.PaddingTop = UDim.new(0, 2); bp.PaddingBottom = UDim.new(0, 3)
+    bp.PaddingLeft = UDim.new(0, 2); bp.PaddingRight = UDim.new(0, 2)
+    -- Einklappen (Klick auf das Zeichen rechts im Header)
+    hmark.MouseButton1Click:Connect(function()
+      body.Visible = not body.Visible
+      hmark.Text = body.Visible and "\xe2\x80\x93" or "+"
+    end)
     -- Drag am Header
     local dragging, ds, sp
     head.InputBegan:Connect(function(i)
@@ -1819,7 +1967,7 @@ local function mountGui()
     table.insert(g.SB_CONNS, UIS.InputEnded:Connect(function(i)
       if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
     end))
-    return { body = body, ord = 0 }
+    return { body = body, ord = 0, frame = panel }
   end
 
   -- Baut den ein/ausklappbaren Einstellungs-Container (Rechtsklick / Pfeil)
@@ -1830,10 +1978,16 @@ local function mountGui()
       if expanded then
         sf = Instance.new("Frame"); sf.LayoutOrder = ord * 10 + 1
         sf.Size = UDim2.new(1, 0, 0, 0); sf.AutomaticSize = Enum.AutomaticSize.Y
-        sf.BackgroundColor3 = Color3.fromRGB(22, 22, 32); sf.BorderSizePixel = 0; sf.Parent = panel.body
+        sf.BackgroundColor3 = SET_BG; sf.BorderSizePixel = 0; sf.Parent = panel.body
+        corner(sf, 2)
         local sl = Instance.new("UIListLayout", sf); sl.SortOrder = Enum.SortOrder.LayoutOrder
         sl.Padding = UDim.new(0, 3); sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
-        local spad = Instance.new("UIPadding", sf); spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
+        local spad = Instance.new("UIPadding", sf)
+        spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
+        -- gruene Kante links: zeigt, dass der Block zum Modul darueber gehoert
+        local edge = Instance.new("Frame"); edge.Size = UDim2.new(0, 2, 1, 0)
+        edge.BackgroundColor3 = ACCENT; edge.BackgroundTransparency = 0.35
+        edge.BorderSizePixel = 0; edge.ZIndex = 2; edge.Parent = sf
         buildSettings(sf)
         if arrow then arrow.Text = "\xe2\x80\x93" end
       else
@@ -1849,28 +2003,32 @@ local function mountGui()
     panel.ord = panel.ord + 1
     local ord = panel.ord
     local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 18); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
+    row.Size = UDim2.new(1, 0, 0, ROW_H); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
     row.BackgroundColor3 = ROW_OFF; row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
-    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "  " .. name
-    row.TextColor3 = TXT_OFF; row.Parent = panel.body
-    local dot = Instance.new("Frame"); dot.Size = UDim2.fromOffset(8, 8)
-    dot.Position = UDim2.new(1, (buildSettings and -26 or -12), 0.5, -4)
-    dot.BorderSizePixel = 0; dot.Parent = row
-    Instance.new("UICorner", dot).CornerRadius = UDim.new(1, 0)
+    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. name
+    row.TextTruncate = Enum.TextTruncate.AtEnd
+    row.TextColor3 = TXT_DIM; row.Parent = panel.body; corner(row, 2)
+    -- Aktiv-Kante links (statt des alten Punktes rechts)
+    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 2, 1, 0)
+    bar.BackgroundColor3 = ACCENT; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = row
     local arrow
     if buildSettings then
-      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(16, 18)
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(16, ROW_H)
       arrow.Position = UDim2.new(1, -16, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.AutoButtonColor = false
       arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.Text = "+"; arrow.Parent = row
     end
+    local hovered = false
     local function paint()
       local on = get()
-      row.BackgroundColor3 = on and ROW_ON or ROW_OFF
-      row.TextColor3 = on and DARKTXT or TXT_OFF
-      dot.BackgroundColor3 = on and DARKTXT or Color3.fromRGB(70, 70, 78)
-      if arrow then arrow.TextColor3 = on and DARKTXT or Color3.fromRGB(140, 140, 150) end
+      row.BackgroundColor3 = on and ROW_ON or (hovered and ROW_HOV or ROW_OFF)
+      row.TextColor3 = on and DARKTXT or (hovered and TXT or TXT_DIM)
+      bar.Visible = (not on) and hovered
+      if arrow then arrow.TextColor3 = on and DARKTXT or Color3.fromRGB(130, 134, 142) end
     end
     paint(); moduleRefs[#moduleRefs + 1] = paint
+    row.MouseEnter:Connect(function() hovered = true; paint() end)
+    row.MouseLeave:Connect(function() hovered = false; paint() end)
     row.MouseButton1Click:Connect(function() set(not get()); paint() end)
     if buildSettings then
       local toggle = makeExpander(panel, ord, arrow, buildSettings)
@@ -1879,29 +2037,57 @@ local function mountGui()
     end
   end
 
-  -- Aktion-Zeile (kein Toggle) — z.B. Apparate / Appa laden
+  -- Aktion-Zeile (kein Toggle) - z.B. Apparate / Map zurueckholen
   local function addAction(panel, labelFn, onClick, buildSettings)
     panel.ord = panel.ord + 1
     local ord = panel.ord
     local row = Instance.new("TextButton")
-    row.Size = UDim2.new(1, 0, 0, 18); row.LayoutOrder = ord * 10; row.AutoButtonColor = true
-    row.BackgroundColor3 = Color3.fromRGB(20, 20, 26); row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
-    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "  " .. labelFn()
-    row.TextColor3 = Color3.fromRGB(210, 215, 235); row.Parent = panel.body
-    moduleRefs[#moduleRefs + 1] = function() row.Text = "  " .. labelFn() end
+    row.Size = UDim2.new(1, 0, 0, ROW_H); row.LayoutOrder = ord * 10; row.AutoButtonColor = false
+    row.BackgroundColor3 = Color3.fromRGB(16, 17, 21); row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
+    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left; row.Text = "   " .. labelFn()
+    row.TextTruncate = Enum.TextTruncate.AtEnd
+    row.TextColor3 = Color3.fromRGB(178, 182, 192); row.Parent = panel.body; corner(row, 2)
+    local bar = Instance.new("Frame"); bar.Size = UDim2.new(0, 2, 1, 0)
+    bar.BackgroundColor3 = ACCENT; bar.BorderSizePixel = 0; bar.Visible = false; bar.Parent = row
+    moduleRefs[#moduleRefs + 1] = function() if row.Parent then row.Text = "   " .. labelFn() end end
     local arrow
     if buildSettings then
-      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(18, 18)
-      arrow.Position = UDim2.new(1, -18, 0, 0); arrow.BackgroundTransparency = 1
-      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.TextColor3 = Color3.fromRGB(150, 150, 165)
+      arrow = Instance.new("TextButton"); arrow.Size = UDim2.fromOffset(16, ROW_H)
+      arrow.Position = UDim2.new(1, -16, 0, 0); arrow.BackgroundTransparency = 1
+      arrow.AutoButtonColor = false
+      arrow.Font = Enum.Font.GothamBold; arrow.TextSize = 13; arrow.TextColor3 = Color3.fromRGB(130, 134, 142)
       arrow.Text = "+"; arrow.Parent = row
     end
-    row.MouseButton1Click:Connect(function() onClick(); row.Text = "  " .. labelFn() end)
+    row.MouseEnter:Connect(function()
+      row.BackgroundColor3 = ROW_HOV; row.TextColor3 = TXT; bar.Visible = true
+    end)
+    row.MouseLeave:Connect(function()
+      row.BackgroundColor3 = Color3.fromRGB(16, 17, 21)
+      row.TextColor3 = Color3.fromRGB(178, 182, 192); bar.Visible = false
+    end)
+    row.MouseButton1Click:Connect(function()
+      onClick(); row.Text = "   " .. labelFn()
+      -- kurzer gruener Blitz als Klick-Feedback
+      row.BackgroundColor3 = ACCENT; row.TextColor3 = DARKTXT
+      task.delay(0.12, function()
+        if row.Parent then row.BackgroundColor3 = ROW_HOV; row.TextColor3 = TXT end
+      end)
+    end)
     if buildSettings then
       local toggle = makeExpander(panel, ord, arrow, buildSettings)
       arrow.MouseButton1Click:Connect(toggle)
       row.MouseButton2Click:Connect(toggle)
     end
+  end
+
+  -- Info-Text innerhalb eines Einstellungs-Blocks
+  local function addInfo(parent, ord, text, height)
+    local i = Instance.new("TextLabel"); i.Size = UDim2.new(1, -12, 0, height or 44); i.LayoutOrder = ord
+    i.BackgroundTransparency = 1; i.Font = Enum.Font.Gotham; i.TextSize = 10
+    i.TextColor3 = Color3.fromRGB(120, 124, 132); i.TextWrapped = true
+    i.TextXAlignment = Enum.TextXAlignment.Left; i.TextYAlignment = Enum.TextYAlignment.Top
+    i.Text = text; i.Parent = parent
+    return i
   end
 
   -- === Combat-Panel ===
@@ -1916,20 +2102,25 @@ local function mountGui()
         function(v) g.SB_AIM_RANGE = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
       makeToggleW(sf, 3, "Vorhalt (Lead)", function() return g.SB_AIM_PRED == true end, function() g.SB_AIM_PRED = not g.SB_AIM_PRED end)
       makeToggleW(sf, 4, "NPC-Aim", function() return g.SB_AIM_NPC == true end, function() g.SB_AIM_NPC = not g.SB_AIM_NPC end)
-      local lblEx = Instance.new("TextLabel"); lblEx.Size = UDim2.new(1, -12, 0, 16); lblEx.LayoutOrder = 5
+      makeToggleW(sf, 5, "Trefferzone variieren", function() return g.SB_AIM_ZONES == true end,
+        function() g.SB_AIM_ZONES = not g.SB_AIM_ZONES; g.SB_AIM_ZONE = {} end)
+      makeSliderW(sf, 6, "Zonen-Wechsel", 0.2, 5, function() return tonumber(g.SB_AIM_ZONEROLL) or 1.2 end,
+        function(v) g.SB_AIM_ZONEROLL = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1fs", v) end)
+      local lblEx = Instance.new("TextLabel"); lblEx.Size = UDim2.new(1, -12, 0, 16); lblEx.LayoutOrder = 30
       lblEx.BackgroundTransparency = 1; lblEx.Font = Enum.Font.GothamBold; lblEx.TextSize = 11
       lblEx.TextColor3 = Color3.fromRGB(160, 160, 180); lblEx.TextXAlignment = Enum.TextXAlignment.Left
       lblEx.Text = "Aim-Ausnahmen:"; lblEx.Parent = sf
-      makePlayerToggles(sf, 6, function(n) return g.SB_AIM_EXEMPT[n] == true end,
+      makePlayerToggles(sf, 31, function(n) return g.SB_AIM_EXEMPT[n] == true end,
         function(n) if g.SB_AIM_EXEMPT[n] then g.SB_AIM_EXEMPT[n] = nil else g.SB_AIM_EXEMPT[n] = true end end)
       -- Ganze Fraktion ausnehmen (aus dem Spiel: factionConfig-IDs + GroupService-Namen)
-      local lblFac = Instance.new("TextLabel"); lblFac.Size = UDim2.new(1, -12, 0, 16); lblFac.LayoutOrder = 7
+      local lblFac = Instance.new("TextLabel"); lblFac.Size = UDim2.new(1, -12, 0, 16); lblFac.LayoutOrder = 32
       lblFac.BackgroundTransparency = 1; lblFac.Font = Enum.Font.GothamBold; lblFac.TextSize = 11
       lblFac.TextColor3 = Color3.fromRGB(160, 160, 180); lblFac.TextXAlignment = Enum.TextXAlignment.Left
       lblFac.Text = "Fraktions-Ausnahmen:"; lblFac.Parent = sf
       local refreshKeep   -- forward-declared: baut die Keep-Target-Liste bei Fraktions-Aenderung neu
       for i, fid in ipairs(factionIds()) do
-        makeToggleW(sf, 7 + i, factionName(fid),
+        makeToggleW(sf, 32 + i, factionName(fid),
           function() return g.SB_AIM_EXEMPT_FACTION[fid] == true end,
           function()
             if g.SB_AIM_EXEMPT_FACTION[fid] then g.SB_AIM_EXEMPT_FACTION[fid] = nil else g.SB_AIM_EXEMPT_FACTION[fid] = true end
@@ -1937,11 +2128,11 @@ local function mountGui()
           end)
       end
       -- Keep-Target: einzelne Mitglieder ausgenommener Fraktionen doch anvisieren (Override der Fraktions-Ausnahme)
-      local lblKeep = Instance.new("TextLabel"); lblKeep.Size = UDim2.new(1, -12, 0, 16); lblKeep.LayoutOrder = 20
+      local lblKeep = Instance.new("TextLabel"); lblKeep.Size = UDim2.new(1, -12, 0, 16); lblKeep.LayoutOrder = 50
       lblKeep.BackgroundTransparency = 1; lblKeep.Font = Enum.Font.GothamBold; lblKeep.TextSize = 11
       lblKeep.TextColor3 = Color3.fromRGB(190, 150, 235); lblKeep.TextXAlignment = Enum.TextXAlignment.Left
       lblKeep.Text = "Keep-Target (trotzdem anvisieren):"; lblKeep.Parent = sf
-      local keepHost = Instance.new("Frame"); keepHost.LayoutOrder = 21; keepHost.BackgroundTransparency = 1
+      local keepHost = Instance.new("Frame"); keepHost.LayoutOrder = 51; keepHost.BackgroundTransparency = 1
       keepHost.Size = UDim2.new(1, 0, 0, 0); keepHost.AutomaticSize = Enum.AutomaticSize.Y; keepHost.Parent = sf
       local keepLay = Instance.new("UIListLayout", keepHost); keepLay.SortOrder = Enum.SortOrder.LayoutOrder; keepLay.Padding = UDim.new(0, 3)
       refreshKeep = function()
@@ -1996,46 +2187,9 @@ local function mountGui()
           getSpellList, function(n) g.SB_SAFE_ROT[i] = n end)
       end
     end)
-  addModule(combat, "Autofarm [K]",
-    function() return g.SB_FARM end,
-    function(v) g.SB_FARM = v; if v then startFarm() end end,
-    function(sf)
-      makeDropdownW(sf, 1, function() return "Spell: " .. tostring(g.SB_FARM_SPELL) end,
-        getSpellList, function(n) g.SB_FARM_SPELL = n end)
-      makeSliderW(sf, 2, "Tiefe (Studs)", 3, 60, function() return tonumber(g.SB_FARM_DEPTH) or 15 end,
-        function(v) g.SB_FARM_DEPTH = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
-      makeSliderW(sf, 3, "Delay/Ziel", 0.05, 1.5, function() return tonumber(g.SB_FARM_DELAY) or 0.25 end,
-        function(v) g.SB_FARM_DELAY = math.floor(v * 100 + 0.5) / 100 end, function(v) return string.format("%.2fs", v) end)
-      makeSliderW(sf, 4, "Runden-Pause", 0, 5, function() return tonumber(g.SB_FARM_ROUND) or 0.5 end,
-        function(v) g.SB_FARM_ROUND = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
-      makeToggleW(sf, 5, "Safe Zones auslassen", function() return g.SB_FARM_SKIP_SAFE == true end,
-        function() g.SB_FARM_SKIP_SAFE = not g.SB_FARM_SKIP_SAFE end)
-      makeToggleW(sf, 6, "Aim-Ausnahmen beachten", function() return g.SB_FARM_EXEMPT_OK == true end,
-        function() g.SB_FARM_EXEMPT_OK = not g.SB_FARM_EXEMPT_OK end)
-      makeToggleW(sf, 7, "Staff auslassen", function() return g.SB_FARM_SKIP_STAFF == true end,
-        function() g.SB_FARM_SKIP_STAFF = not g.SB_FARM_SKIP_STAFF end)
-      makeToggleW(sf, 8, "Map wegraeumen beim Start", function() return g.SB_FARM_NUKE == true end,
-        function() g.SB_FARM_NUKE = not g.SB_FARM_NUKE end)
-      makeToggleW(sf, 9, "Map beim Stoppen zurueck", function() return g.SB_FARM_UNNUKE == true end,
-        function() g.SB_FARM_UNNUKE = not g.SB_FARM_UNNUKE end)
-      makeToggleW(sf, 10, "Terrain-Blase (umkehrbar)", function() return g.SB_FARM_CARVE == true end,
-        function() g.SB_FARM_CARVE = not g.SB_FARM_CARVE end)
-      makeToggleW(sf, 11, "Terrain global loeschen", function() return g.SB_FARM_WIPE_TERRAIN == true end,
-        function() g.SB_FARM_WIPE_TERRAIN = not g.SB_FARM_WIPE_TERRAIN end)
-      makeToggleW(sf, 12, "Endlos wiederholen", function() return g.SB_FARM_REPEAT == true end,
-        function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
-      makeToggleW(sf, 13, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
-        function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
-      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 80); fi.LayoutOrder = 14
-      fi.BackgroundTransparency = 1; fi.Font = Enum.Font.Gotham; fi.TextSize = 11
-      fi.TextColor3 = Color3.fromRGB(150, 150, 170); fi.TextWrapped = true
-      fi.TextXAlignment = Enum.TextXAlignment.Left
-      fi.Text = "Map wird nur ausgehaengt und ist per 'Map zurueckholen' wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder."
-      fi.Parent = sf
-    end)
 
   -- === Troll-Panel ===
-  local troll = makePanel("Troll", 26, 40 + 200)
+  local troll = makePanel("Troll", 26, 40 + 210)
   addModule(troll, "Shotgun",
     function() return g.SB_SHOT end,
     function(v) g.SB_SHOT = v; if v then startShotgun() end end,
@@ -2066,7 +2220,7 @@ local function mountGui()
       rb.Text = "zurueck auf A"; rb.Parent = sf; corner(rb, 4)
       rb.MouseButton1Click:Connect(function() g.SB_SHOT_IDX = 1 end)
     end)
-  addAction(troll, function() return "Snipe [M] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
+  addAction(troll, function() return "Snipe [E] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
     function() task.spawn(doSnipe) end,
     function(sf)
       makeSliderW(sf, 1, "Tiefe", 5, 60, function() return tonumber(g.SB_SNIPE_DEPTH) or 15 end,
@@ -2089,8 +2243,65 @@ local function mountGui()
       end
     end)
 
+  -- === Farm-Panel (Autofarm, Map-Handling, KD) ===
+  local farm = makePanel("Farm", 26 + PANEL_W + 10, 40)
+  addModule(farm, "Autofarm",
+    function() return g.SB_FARM end,
+    function(v) g.SB_FARM = v; if v then startFarm() end end,
+    function(sf)
+      makeDropdownW(sf, 1, function() return "Spell: " .. tostring(g.SB_FARM_SPELL) end,
+        getSpellList, function(n) g.SB_FARM_SPELL = n end)
+      makeSliderW(sf, 2, "Tiefe (Studs)", 3, 60, function() return tonumber(g.SB_FARM_DEPTH) or 15 end,
+        function(v) g.SB_FARM_DEPTH = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
+      makeSliderW(sf, 3, "Delay/Ziel", 0.05, 1.5, function() return tonumber(g.SB_FARM_DELAY) or 0.25 end,
+        function(v) g.SB_FARM_DELAY = math.floor(v * 100 + 0.5) / 100 end, function(v) return string.format("%.2fs", v) end)
+      makeSliderW(sf, 4, "Runden-Pause", 0, 5, function() return tonumber(g.SB_FARM_ROUND) or 0.5 end,
+        function(v) g.SB_FARM_ROUND = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
+      makeToggleW(sf, 5, "Safe Zones auslassen", function() return g.SB_FARM_SKIP_SAFE == true end,
+        function() g.SB_FARM_SKIP_SAFE = not g.SB_FARM_SKIP_SAFE end)
+      makeToggleW(sf, 6, "Aim-Ausnahmen beachten", function() return g.SB_FARM_EXEMPT_OK == true end,
+        function() g.SB_FARM_EXEMPT_OK = not g.SB_FARM_EXEMPT_OK end)
+      makeToggleW(sf, 7, "Staff auslassen", function() return g.SB_FARM_SKIP_STAFF == true end,
+        function() g.SB_FARM_SKIP_STAFF = not g.SB_FARM_SKIP_STAFF end)
+      makeToggleW(sf, 8, "Map wegraeumen beim Start", function() return g.SB_FARM_NUKE == true end,
+        function() g.SB_FARM_NUKE = not g.SB_FARM_NUKE end)
+      makeToggleW(sf, 9, "Map beim Stoppen zurueck", function() return g.SB_FARM_UNNUKE == true end,
+        function() g.SB_FARM_UNNUKE = not g.SB_FARM_UNNUKE end)
+      makeToggleW(sf, 10, "Terrain-Blase (umkehrbar)", function() return g.SB_FARM_CARVE == true end,
+        function() g.SB_FARM_CARVE = not g.SB_FARM_CARVE end)
+      makeToggleW(sf, 11, "Terrain global loeschen", function() return g.SB_FARM_WIPE_TERRAIN == true end,
+        function() g.SB_FARM_WIPE_TERRAIN = not g.SB_FARM_WIPE_TERRAIN end)
+      makeToggleW(sf, 12, "Endlos wiederholen", function() return g.SB_FARM_REPEAT == true end,
+        function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
+      makeToggleW(sf, 13, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
+        function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
+      addInfo(sf, 14, "Map wird nur ausgehaengt und ist per 'Map zurueckholen' wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
+    end)
+  addAction(farm, function()
+      return g.SB_MAP_NUKED and ("Map weg (" .. #g.SB_MAP_PARKED .. " Teile)") or "Map wegraeumen (lokal)"
+    end,
+    function() parkMap() end)
+  addAction(farm, function()
+      if g.SB_TERR_WIPED then return "Map zurueckholen (Terrain: Rejoin)" end
+      return g.SB_MAP_LAST and ("Map zurueckgeholt (" .. tostring(g.SB_MAP_LAST) .. ")") or "Map zurueckholen"
+    end,
+    function() restoreMap() end)
+  addModule(farm, "KD-Farm",
+    function() return g.SB_KD end,
+    function(v) g.SB_KD = v; if v then g.SB_KD_COUNT = 0; startKD() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Pause nach Respawn", 0.1, 10, function() return tonumber(g.SB_KD_PAUSE) or 0.3 end,
+        function(v) g.SB_KD_PAUSE = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
+      makeSliderW(sf, 2, "Stopp nach n Toden", 0, 200, function() return tonumber(g.SB_KD_LIMIT) or 0 end,
+        function(v) g.SB_KD_LIMIT = math.floor(v + 0.5) end,
+        function(v) local n = math.floor(v + 0.5); return (n == 0) and "endlos" or tostring(n) end)
+      addInfo(sf, 3, "Nutzt den Reset-Pfad des Spiels (resetEvent). Tod nach ~0.15s, Respawn nach ~3s -> ca. 15 Tode/Minute; schneller laesst der Server nicht zu.", 52)
+    end)
+  -- Live-Anzeige der eigenen oeffentlichen Stats (aktualisiert sich im Refresh-Loop)
+  addAction(farm, function() return kdLabel() end, function() end)
+
   -- === Utility-Panel ===
-  local util = makePanel("Utility", 26 + PANEL_W + 10, 40)
+  local util = makePanel("Utility", 26 + (PANEL_W + 10) * 2, 40)
   addAction(util, function() return "Apparate \xe2\x86\x92 " .. tostring(g.SB_APPA_TARGET or "-") end,
     function() apparateTo(g.SB_APPA_TARGET) end,
     function(sf)
@@ -2104,15 +2315,6 @@ local function mountGui()
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
-  addAction(util, function()
-      return g.SB_MAP_NUKED and ("Map weg (" .. #g.SB_MAP_PARKED .. " Teile)") or "Map wegraeumen (lokal)"
-    end,
-    function() parkMap() end)
-  addAction(util, function()
-      if g.SB_TERR_WIPED then return "Map zurueckholen (Terrain: Rejoin)" end
-      return g.SB_MAP_LAST and ("Map zurueckgeholt (" .. tostring(g.SB_MAP_LAST) .. ")") or "Map zurueckholen"
-    end,
-    function() restoreMap() end)
   addModule(util, "Box-ESP",
     function() return g.SB_TEAM_ESP end,
     function(v) g.SB_TEAM_ESP = v; if v then startVisuals() end end)
@@ -2122,24 +2324,6 @@ local function mountGui()
   addModule(util, "Chams (sichtbar)",
     function() return g.SB_CHAMS end,
     function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
-  addModule(util, "KD-Farm [J]",
-    function() return g.SB_KD end,
-    function(v) g.SB_KD = v; if v then g.SB_KD_COUNT = 0; startKD() end end,
-    function(sf)
-      makeSliderW(sf, 1, "Pause nach Respawn", 0.1, 10, function() return tonumber(g.SB_KD_PAUSE) or 0.3 end,
-        function(v) g.SB_KD_PAUSE = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
-      makeSliderW(sf, 2, "Stopp nach n Toden", 0, 200, function() return tonumber(g.SB_KD_LIMIT) or 0 end,
-        function(v) g.SB_KD_LIMIT = math.floor(v + 0.5) end,
-        function(v) local n = math.floor(v + 0.5); return (n == 0) and "endlos" or tostring(n) end)
-      local ki = Instance.new("TextLabel"); ki.Size = UDim2.new(1, -12, 0, 54); ki.LayoutOrder = 3
-      ki.BackgroundTransparency = 1; ki.Font = Enum.Font.Gotham; ki.TextSize = 11
-      ki.TextColor3 = Color3.fromRGB(150, 150, 170); ki.TextWrapped = true
-      ki.TextXAlignment = Enum.TextXAlignment.Left
-      ki.Text = "Nutzt den Reset-Pfad des Spiels (resetEvent). Tod nach ~0.15s, Respawn nach ~3s -> ca. 18 Tode/Minute; schneller laesst der Server nicht zu."
-      ki.Parent = sf
-    end)
-  -- Live-Anzeige der eigenen oeffentlichen Stats (aktualisiert sich im Refresh-Loop)
-  addAction(util, function() return kdLabel() end, function() end)
 
   -- Freunde: von Silent-Aim UND Autofarm ausgenommen, per UserId in einer Datei gemerkt
   addAction(util, function() return "Freunde (" .. friendCount() .. ")" end,
@@ -2229,16 +2413,23 @@ local function mountGui()
       info.Parent = sf
     end)
 
-  -- Hinweis unten in Utility
-  local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
-  hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
-  hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
-  hint.TextXAlignment = Enum.TextXAlignment.Left
-  hint.Text = "Rechtsklick = Settings.  RShift/B schliesst.  K = Autofarm."
-  hint.Parent = util.body
+  -- Statusleiste unten mittig (ersetzt den alten Hinweistext im Utility-Panel)
+  local barHolder = Instance.new("Frame")
+  barHolder.AnchorPoint = Vector2.new(0.5, 1); barHolder.Position = UDim2.new(0.5, 0, 1, -14)
+  barHolder.Size = UDim2.fromOffset(0, 26); barHolder.AutomaticSize = Enum.AutomaticSize.X
+  barHolder.BackgroundColor3 = Color3.fromRGB(12, 13, 16); barHolder.BackgroundTransparency = 0.12
+  barHolder.BorderSizePixel = 0; barHolder.Parent = clickRoot
+  corner(barHolder, 2); stroke(barHolder, Color3.fromRGB(0, 0, 0), 0.4)
+  local barAcc = Instance.new("Frame"); barAcc.Size = UDim2.new(1, 0, 0, 2)
+  barAcc.BackgroundColor3 = ACCENT; barAcc.BorderSizePixel = 0; barAcc.Parent = barHolder
+  local barTxt = Instance.new("TextLabel"); barTxt.AutomaticSize = Enum.AutomaticSize.X
+  barTxt.Size = UDim2.fromOffset(0, 26); barTxt.BackgroundTransparency = 1
+  barTxt.Font = Enum.Font.Gotham; barTxt.TextSize = 13; barTxt.TextColor3 = Color3.fromRGB(170, 174, 182)
+  barTxt.Text = "   Linksklick togglen  Â·  Rechtsklick = Einstellungen  Â·  Header ziehen / â klappt ein  Â·  RShift/B schliesst  Â·  Bild-Ab = Streamproof   "
+  barTxt.Parent = barHolder
 
   -- === Client-Panel (globale Optionen) ===
-  local cfg = makePanel("Client", 26 + (PANEL_W + 10) * 2, 40)
+  local cfg = makePanel("Client", 26 + (PANEL_W + 10) * 3, 40)
   makeSliderW(cfg.body, 1, "Legitness", 0, 100,
     function() return tonumber(g.SB_LEGIT) or 0 end,
     function(v) g.SB_LEGIT = math.floor(v + 0.5) end,
@@ -2277,10 +2468,13 @@ local function mountGui()
     table.sort(on, function(a, b) return #a > #b end)
     for idx, nm in ipairs(on) do
       local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
-      t.Size = UDim2.fromOffset(0, 26); t.LayoutOrder = idx
-      t.BackgroundColor3 = Color3.fromRGB(12, 13, 16); t.BackgroundTransparency = 0.1
-      t.Font = Enum.Font.GothamBold; t.TextSize = 18; t.TextColor3 = Color3.fromRGB(240, 245, 240)
+      t.Size = UDim2.fromOffset(0, 24); t.LayoutOrder = idx
+      t.BackgroundColor3 = Color3.fromRGB(12, 13, 16); t.BackgroundTransparency = 0.12
+      t.Font = Enum.Font.GothamBold; t.TextSize = 17; t.TextColor3 = Color3.fromRGB(238, 243, 238)
       t.Text = "  " .. nm .. "  "; t.Parent = arrayHolder
+      local tg = Instance.new("UIGradient", t)      -- nach links leicht auslaufen
+      tg.Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35),
+                                             NumberSequenceKeypoint.new(1, 0) })
       local b = Instance.new("Frame"); b.Size = UDim2.new(0, 3, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
       b.BorderSizePixel = 0; b.BackgroundColor3 = ACCENT; b.Parent = t
     end
@@ -2298,13 +2492,38 @@ local function mountGui()
   end)
 
   -- === Watermark oben links (Future-Style) ===
+  local wmBox = Instance.new("Frame")
+  wmBox.Position = UDim2.fromOffset(10, 6); wmBox.Size = UDim2.fromOffset(0, 40)
+  wmBox.AutomaticSize = Enum.AutomaticSize.X; wmBox.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
+  wmBox.BackgroundTransparency = 0.15; wmBox.BorderSizePixel = 0; wmBox.Parent = gui
+  corner(wmBox, 2); stroke(wmBox, Color3.fromRGB(0, 0, 0), 0.4)
+  local wmEdge = Instance.new("Frame"); wmEdge.Size = UDim2.new(0, 3, 1, 0)
+  wmEdge.BackgroundColor3 = ACCENT; wmEdge.BorderSizePixel = 0; wmEdge.Parent = wmBox
   local wm = Instance.new("TextLabel")
-  wm.AnchorPoint = Vector2.new(0, 0); wm.Position = UDim2.fromOffset(10, 6)
-  wm.Size = UDim2.fromOffset(0, 0); wm.AutomaticSize = Enum.AutomaticSize.XY
-  wm.BackgroundTransparency = 1; wm.Font = Enum.Font.GothamBlack; wm.TextSize = 34
-  wm.TextColor3 = ACCENT; wm.Text = "Spellbound"; wm.Parent = gui
+  wm.Position = UDim2.fromOffset(11, 0); wm.Size = UDim2.fromOffset(0, 40)
+  wm.AutomaticSize = Enum.AutomaticSize.X; wm.BackgroundTransparency = 1
+  wm.Font = Enum.Font.GothamBlack; wm.TextSize = 26; wm.TextColor3 = ACCENT
+  wm.TextXAlignment = Enum.TextXAlignment.Left; wm.Text = "Spellbound   "; wm.Parent = wmBox
   local wmg = Instance.new("UIGradient", wm)
   wmg.Color = ColorSequence.new(ACCENT, Color3.fromRGB(120, 90, 220))
+  local wmSub = Instance.new("TextLabel")
+  wmSub.AnchorPoint = Vector2.new(1, 0.5); wmSub.Position = UDim2.new(1, -10, 0.5, 1)
+  wmSub.Size = UDim2.fromOffset(0, 18); wmSub.AutomaticSize = Enum.AutomaticSize.X
+  wmSub.BackgroundTransparency = 1; wmSub.Font = Enum.Font.GothamBold; wmSub.TextSize = 13
+  wmSub.TextColor3 = Color3.fromRGB(150, 154, 162); wmSub.TextXAlignment = Enum.TextXAlignment.Right
+  wmSub.Text = lp.Name; wmSub.Parent = wmBox
+  -- FPS + laufender Status (Farm-Ziel / Wand-Status) im Watermark mitfuehren
+  local fps, fpsAcc, fpsN = 60, 0, 0
+  table.insert(g.SB_CONNS, RunService.RenderStepped:Connect(function(dt)
+    fpsAcc = fpsAcc + dt; fpsN = fpsN + 1
+    if fpsAcc >= 0.5 then fps = math.floor(fpsN / fpsAcc + 0.5); fpsAcc, fpsN = 0, 0 end
+  end))
+  moduleRefs[#moduleRefs + 1] = function()
+    local extra = ""
+    if g.SB_FARM and g.SB_FARM_TARGET then extra = "  Â·  â " .. tostring(g.SB_FARM_TARGET)
+    elseif g.SB_STATUS then extra = "  Â·  " .. tostring(g.SB_STATUS) end
+    wmSub.Text = lp.Name .. "  Â·  " .. fps .. " fps" .. extra
+  end
 
   -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
@@ -2320,12 +2539,8 @@ local function mountGui()
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
       g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
-    elseif i.KeyCode == Enum.KeyCode.K then
-      g.SB_FARM = not g.SB_FARM; if g.SB_FARM then startFarm() end
-    elseif i.KeyCode == Enum.KeyCode.M then
+    elseif i.KeyCode == Enum.KeyCode.E then
       doSnipe()                                   -- 1 Ziel: runter, Spell, zurueck
-    elseif i.KeyCode == Enum.KeyCode.J then
-      g.SB_KD = not g.SB_KD; if g.SB_KD then g.SB_KD_COUNT = 0; startKD() end
     end
   end))
 
