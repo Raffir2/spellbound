@@ -6,6 +6,8 @@
 --   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
+--   AUTOFARM (K): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
+--       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
 --   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H-Hotkeys entfernt;
 --   P=Clash, C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
@@ -31,6 +33,12 @@ g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
 g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
 g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel % ALLER Cheat-Aktionen failen absichtlich
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
+g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
+g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
+pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
+  local h = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if h and h.Anchored then h.Anchored = false end
+end)
 g.SB_CLICK_HOOKED, g.SB_CASTING, g.SB_REFS = false, false, nil
 g.SB_PRELOADED, g.SB_LAST_CAST = nil, 0
 g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = false, false, false   -- Visuals beim Reload aus
@@ -258,7 +266,7 @@ local function startSelector()
   g.SB_CURSE_LOOP = true
   task.spawn(function()
     local nextAcquire = 0
-    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING do
+    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM do
       pcall(function()
         if not g.SB_MOUSE then
           local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
@@ -282,7 +290,7 @@ local function startSelector()
         end
         g.SB_STATUS = nil
         -- Vor-Equip: nach 0.4s ohne Cast den aktuellen Slot schon laden (naechster Klick feuert sofort)
-        if g.SB_SAFE and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
+        if g.SB_SAFE and not g.SB_FARM and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
            and os.clock() >= (g.SB_APPA_LOCK or 0)
            and refs and refs.set and refs.state and not isStunnedOrBound() then
           if (os.clock() - (g.SB_LAST_CAST or 0)) >= 0.4 then
@@ -835,6 +843,173 @@ local function apparateTo(name)
   return true
 end
 
+--========================= Autofarm (Map weg + Untergrund-Hopping) =========================--
+-- Ablauf pro Runde: Map lokal loeschen -> unter den naechsten Spieler teleportieren ->
+-- EINEN Spell nach oben feuern -> naechster Spieler.
+-- Aus dem Spiel geprueft: ALLE Charaktere haengen in Workspace.Terrain.characters, die
+-- Spell-Effekte in Terrain.effects/shields/protegos -> alles was direkt unter Workspace
+-- haengt ist reine Map und kann gefahrlos zerstoert werden (Spieler/Effekte bleiben).
+-- Der Boden ist echtes Terrain-Voxel, deshalb zusaetzlich Terrain:Clear() - sonst blockt
+-- der Boden Sicht und Projektil, wenn von unten gefeuert wird.
+-- Ohne Boden faellt man sofort ins Nichts -> das HRP wird waehrend des Farmens verankert
+-- und beim Ausschalten wieder freigegeben (optional zurueck an die Startposition).
+-- Alles rein clientseitig: der Server sieht nur Bewegung + normale Casts, ein Rejoin
+-- stellt die Map wieder her.
+g.SB_FARM_SPELL = g.SB_FARM_SPELL or resolveSpell("avada kedavra")
+g.SB_FARM_DEPTH = tonumber(g.SB_FARM_DEPTH) or 15     -- Studs unter dem Ziel
+g.SB_FARM_DELAY = tonumber(g.SB_FARM_DELAY) or 0.25   -- Wartezeit nach dem TP vor dem Cast
+g.SB_FARM_ROUND = tonumber(g.SB_FARM_ROUND) or 0.5    -- Pause zwischen zwei Runden
+if g.SB_FARM_NUKE         == nil then g.SB_FARM_NUKE = true end          -- Map beim Start loeschen
+if g.SB_FARM_CLEARTERRAIN == nil then g.SB_FARM_CLEARTERRAIN = true end  -- Terrain-Voxel mitloeschen
+if g.SB_FARM_EXEMPT_OK    == nil then g.SB_FARM_EXEMPT_OK = true end     -- Aim-Ausnahmen beachten
+if g.SB_FARM_SKIP_STAFF   == nil then g.SB_FARM_SKIP_STAFF = true end    -- Moderatoren auslassen
+if g.SB_FARM_RETURN       == nil then g.SB_FARM_RETURN = true end        -- am Ende zurueck
+if g.SB_FARM_REPEAT       == nil then g.SB_FARM_REPEAT = true end        -- endlos rotieren
+
+-- Map lokal zerstoeren. Terrain + Camera + alles mit "_" (z.B. _Anchor) bleiben stehen.
+local function nukeMap(clearTerrain)
+  local killed = 0
+  for _, c in ipairs(workspace:GetChildren()) do
+    if not c:IsA("Terrain") and not c:IsA("Camera") and c.Name:sub(1, 1) ~= "_" then
+      if pcall(function() c:Destroy() end) then killed = killed + 1 end
+    end
+  end
+  if clearTerrain then pcall(function() workspace.Terrain:Clear() end) end
+  g.SB_MAP_NUKED  = true
+  g.SB_MAP_KILLED = (tonumber(g.SB_MAP_KILLED) or 0) + killed
+  return killed
+end
+
+-- HRP holen und (waehrend des Farmens) verankern - ohne Boden faellt man sonst raus.
+local function farmHRP(anchor)
+  local ch  = lp.Character
+  local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+  if not hrp then return nil end
+  if anchor and not hrp.Anchored then
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.Anchored = true
+  end
+  return hrp
+end
+
+local function farmTeleport(pos)
+  local hrp = farmHRP(true)
+  if not hrp then return false end
+  local rot = hrp.CFrame - hrp.CFrame.Position     -- Blickrichtung beibehalten
+  hrp.CFrame = CFrame.new(pos) * rot
+  hrp.AssemblyLinearVelocity = Vector3.zero
+  return true
+end
+
+-- Ein Cast auf eine feste Position (ohne Mausklick): erst der echte WandClient-Pfad
+-- (load -> fire), sonst der Packet-Fallback wie beim Appa.
+local function farmCast(targetPos)
+  if legitFail() then return false end             -- Legitness: Cast absichtlich verschlucken
+  local spell = resolveSpell(g.SB_FARM_SPELL or "avada kedavra")
+  local refs  = g.SB_REFS
+  if refs and refs.set and refs.state and refs.fire then
+    local st = refs.state
+    st.casts = 0
+    pcall(refs.set, spell, true)
+    task.wait(0.07)                                -- Server den Load registrieren lassen
+    if st.loadedSpell == spell then
+      st.casts = 0
+      if pcall(refs.fire, targetPos) then
+        g.SB_FARM_CASTS = (tonumber(g.SB_FARM_CASTS) or 0) + 1
+        g.SB_CASTS      = (tonumber(g.SB_CASTS) or 0) + 1
+        g.SB_LAST_CAST  = os.clock()
+        g.SB_PRELOADED  = nil
+        return true
+      end
+    end
+  end
+  local ch   = lp.Character
+  local wand = ch and ch:FindFirstChildWhichIsA("Tool")
+  if wand and castReplicated(refs and refs.state or nil, wand, spell, targetPos) then
+    g.SB_FARM_CASTS = (tonumber(g.SB_FARM_CASTS) or 0) + 1
+    g.SB_LAST_CAST  = os.clock()
+    return true
+  end
+  return false
+end
+
+-- Zielliste: lebende Spieler, naechster zuerst; respektiert (optional) die Silent-Aim-
+-- Ausnahmen inkl. Fraktions-Ausnahmen und Keep-Target-Override.
+local function farmTargets()
+  local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  local me    = myHRP and myHRP.Position or Vector3.zero
+  local list  = {}
+  for _, pl in ipairs(Players:GetPlayers()) do
+    if pl ~= lp then
+      local ch   = pl.Character
+      local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+      local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+      if root and hum and hum.Health > 0 then
+        local skip = false
+        if g.SB_FARM_EXEMPT_OK then
+          local fid = playerFactionId(pl)
+          if g.SB_AIM_EXEMPT[pl.Name] then skip = true end
+          if fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name] then skip = true end
+        end
+        if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
+        if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
+      end
+    end
+  end
+  table.sort(list, function(a, b) return a.d < b.d end)
+  local out = {}
+  for i, e in ipairs(list) do out[i] = e.pl end
+  return out
+end
+
+local function startFarm()
+  if g.SB_FARM_LOOP then return end
+  g.SB_FARM_LOOP = true
+  startSelector()                                  -- haelt g.SB_REFS/Wand-Closures aktuell
+  task.spawn(function()
+    local hrp0 = farmHRP(false)
+    g.SB_FARM_HOME = g.SB_FARM_HOME or (hrp0 and hrp0.CFrame)
+    if g.SB_FARM_NUKE and not g.SB_MAP_NUKED then nukeMap(g.SB_FARM_CLEARTERRAIN) end
+    while g.SB_FARM do
+      local targets = farmTargets()
+      if #targets == 0 then
+        g.SB_FARM_TARGET = nil
+        task.wait(0.5)
+      else
+        for _, pl in ipairs(targets) do
+          if not g.SB_FARM then break end
+          local ch   = pl.Character
+          local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+          local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+          if root and hum and hum.Health > 0 then
+            g.SB_FARM_TARGET = pl.Name
+            local depth = tonumber(g.SB_FARM_DEPTH) or 15
+            if farmTeleport(root.Position - Vector3.new(0, depth, 0)) then
+              task.wait(tonumber(g.SB_FARM_DELAY) or 0.25)
+              -- Ziel koennte inzwischen weg/tot sein -> frisch pruefen
+              if g.SB_FARM and root.Parent and hum.Health > 0 and not isStunnedOrBound() then
+                farmCast(root.Position)
+              end
+            end
+          end
+        end
+        g.SB_FARM_TARGET = nil
+        if not g.SB_FARM_REPEAT then g.SB_FARM = false end
+      end
+      task.wait(tonumber(g.SB_FARM_ROUND) or 0.5)
+    end
+    -- Aufraeumen: zurueck an den Startpunkt, dann entankern
+    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+      if g.SB_FARM_RETURN and g.SB_FARM_HOME then pcall(function() hrp.CFrame = g.SB_FARM_HOME end) end
+      hrp.Anchored = false
+      hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+    g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
+    g.SB_FARM_LOOP = false
+  end)
+end
+
 --========================= Spell-Liste (fuer Dropdowns) =========================--
 local function getSpellList()
   local okS, spells = pcall(function() return require(RS.shared.modules.spells) end)
@@ -1224,6 +1399,37 @@ local function mountGui()
           getSpellList, function(n) g.SB_SAFE_ROT[i] = n end)
       end
     end)
+  addModule(combat, "Autofarm [K]",
+    function() return g.SB_FARM end,
+    function(v) g.SB_FARM = v; if v then startFarm() end end,
+    function(sf)
+      makeDropdownW(sf, 1, function() return "Spell: " .. tostring(g.SB_FARM_SPELL) end,
+        getSpellList, function(n) g.SB_FARM_SPELL = n end)
+      makeSliderW(sf, 2, "Tiefe (Studs)", 3, 60, function() return tonumber(g.SB_FARM_DEPTH) or 15 end,
+        function(v) g.SB_FARM_DEPTH = math.floor(v + 0.5) end, function(v) return tostring(math.floor(v + 0.5)) end)
+      makeSliderW(sf, 3, "Delay/Ziel", 0.05, 1.5, function() return tonumber(g.SB_FARM_DELAY) or 0.25 end,
+        function(v) g.SB_FARM_DELAY = math.floor(v * 100 + 0.5) / 100 end, function(v) return string.format("%.2fs", v) end)
+      makeSliderW(sf, 4, "Runden-Pause", 0, 5, function() return tonumber(g.SB_FARM_ROUND) or 0.5 end,
+        function(v) g.SB_FARM_ROUND = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
+      makeToggleW(sf, 5, "Map loeschen beim Start", function() return g.SB_FARM_NUKE == true end,
+        function() g.SB_FARM_NUKE = not g.SB_FARM_NUKE end)
+      makeToggleW(sf, 6, "Terrain mitloeschen", function() return g.SB_FARM_CLEARTERRAIN == true end,
+        function() g.SB_FARM_CLEARTERRAIN = not g.SB_FARM_CLEARTERRAIN end)
+      makeToggleW(sf, 7, "Aim-Ausnahmen beachten", function() return g.SB_FARM_EXEMPT_OK == true end,
+        function() g.SB_FARM_EXEMPT_OK = not g.SB_FARM_EXEMPT_OK end)
+      makeToggleW(sf, 8, "Staff auslassen", function() return g.SB_FARM_SKIP_STAFF == true end,
+        function() g.SB_FARM_SKIP_STAFF = not g.SB_FARM_SKIP_STAFF end)
+      makeToggleW(sf, 9, "Endlos wiederholen", function() return g.SB_FARM_REPEAT == true end,
+        function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
+      makeToggleW(sf, 10, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
+        function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
+      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 54); fi.LayoutOrder = 11
+      fi.BackgroundTransparency = 1; fi.Font = Enum.Font.Gotham; fi.TextSize = 11
+      fi.TextColor3 = Color3.fromRGB(150, 150, 170); fi.TextWrapped = true
+      fi.TextXAlignment = Enum.TextXAlignment.Left
+      fi.Text = "Loescht die Map nur lokal (Rejoin holt sie zurueck), teleportiert unter jeden Spieler und feuert je einen Spell nach oben."
+      fi.Parent = sf
+    end)
 
   -- === Utility-Panel ===
   local util = makePanel("Utility", 26 + PANEL_W + 10, 40)
@@ -1240,6 +1446,10 @@ local function mountGui()
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
+  addAction(util, function()
+      return g.SB_MAP_NUKED and ("Map weg (" .. tostring(g.SB_MAP_KILLED or 0) .. ")") or "Map loeschen (lokal)"
+    end,
+    function() nukeMap(g.SB_FARM_CLEARTERRAIN) end)
   addModule(util, "Box-ESP",
     function() return g.SB_TEAM_ESP end,
     function(v) g.SB_TEAM_ESP = v; if v then startVisuals() end end)
@@ -1271,7 +1481,8 @@ local function mountGui()
   local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 999
   hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
   hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
-  hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Text = "Rechtsklick = Settings.  RShift/B schliesst."
+  hint.TextXAlignment = Enum.TextXAlignment.Left
+  hint.Text = "Rechtsklick = Settings.  RShift/B schliesst.  K = Autofarm."
   hint.Parent = util.body
 
   -- === Client-Panel (globale Optionen) ===
@@ -1303,6 +1514,7 @@ local function mountGui()
     { "Auto-Clash",  function() return g.SB_CLASH end },
     { "Auto-Dodge",  function() return g.SB_DODGE end },
     { "Safe-Combat", function() return g.SB_SAFE end },
+    { "Autofarm",    function() return g.SB_FARM end },
   }
   local function rebuildArray()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
@@ -1352,6 +1564,8 @@ local function mountGui()
       apparateTo(g.SB_APPA_TARGET)
     elseif i.KeyCode == Enum.KeyCode.G then
       g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
+    elseif i.KeyCode == Enum.KeyCode.K then
+      g.SB_FARM = not g.SB_FARM; if g.SB_FARM then startFarm() end
     end
   end))
 
