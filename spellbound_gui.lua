@@ -1700,9 +1700,12 @@ local function mountGui()
     return TW:Create(o, TweenInfo.new(t, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play()
   end
 
-  local openList                 -- offenes Dropdown (nur eins gleichzeitig)
+  local openList, openOwner      -- offenes Dropdown (nur eins gleichzeitig) + wem es gehoert
   local moduleRefs = {}          -- Modul-Zeilen fuer Farb-/Text-Refresh
-  local function closeList() if openList then openList:Destroy(); openList = nil end end
+  local function closeList()
+    if openList then openList:Destroy() end
+    openList, openOwner = nil, nil
+  end
 
   -- === Dim-Overlay (ClickGUI-Wurzel, per RechtsShift ein/aus) ===
   local clickRoot = Instance.new("Frame")
@@ -1757,6 +1760,7 @@ local function mountGui()
     knob.BackgroundColor3 = Color3.fromRGB(150, 154, 162); knob.Parent = track; corner(knob, 4)
     local hovered = false
     local function paint(anim)
+      if not r.Parent then return false end
       local on = get() and true or false
       local kp = UDim2.fromOffset(on and 11 or 1, 1)
       if anim then
@@ -1774,7 +1778,7 @@ local function mountGui()
     r.MouseEnter:Connect(function() hovered = true; paint(false) end)
     r.MouseLeave:Connect(function() hovered = false; paint(false) end)
     r.MouseButton1Click:Connect(function() set(not get()); paint(true) end)
-    moduleRefs[#moduleRefs + 1] = function() if r.Parent then paint(false) end end
+    moduleRefs[#moduleRefs + 1] = function() return paint(false) end
   end
 
   -- Slider mit Knopf, Wert rechts im Label und Klick/Drag auf der ganzen Zeile.
@@ -1830,7 +1834,10 @@ local function mountGui()
         dragging = false
       end
     end))
-    moduleRefs[#moduleRefs + 1] = function() if holder.Parent and not dragging then upd() end end
+    moduleRefs[#moduleRefs + 1] = function()
+      if not holder.Parent then return false end
+      if not dragging then upd() end
+    end
   end
 
   local function makeDropdownW(parent, ord, labelFn, itemsFn, onPick)
@@ -1847,10 +1854,13 @@ local function mountGui()
     btn.MouseEnter:Connect(function() btn.BackgroundColor3 = WIDGET_H end)
     btn.MouseLeave:Connect(function() btn.BackgroundColor3 = WIDGET end)
     btn.MouseButton1Click:Connect(function()
-      local wasOpen = openList
+      -- Klick ins Leere (clickRoot) schliesst bereits jede offene Liste, daher hier nur
+      -- pruefen, ob MEINE Liste noch offen ist -> dann ist der Klick ein Zuklappen.
+      local mine = (openOwner == btn)
       closeList()
-      if wasOpen then return end                       -- zweiter Klick schliesst nur
+      if mine then return end
       local items = itemsFn()
+      if btn.AbsoluteSize.X <= 0 then RunService.Heartbeat:Wait() end   -- Layout abwarten
       local sf = Instance.new("ScrollingFrame")
       -- panelHost ist um UI_SCALE skaliert -> in Host-lokalen (unskalierten) Koordinaten setzen
       local baseW = btn.AbsoluteSize.X / UI_SCALE
@@ -1874,9 +1884,12 @@ local function mountGui()
         it.MouseLeave:Connect(function() it.BackgroundColor3 = Color3.fromRGB(20, 21, 26) end)
         it.MouseButton1Click:Connect(function() onPick(name); btn.Text = "  " .. labelFn(); closeList() end)
       end
-      openList = sf
+      openList, openOwner = sf, btn
     end)
-    moduleRefs[#moduleRefs + 1] = function() if btn.Parent then btn.Text = "  " .. labelFn() end end
+    moduleRefs[#moduleRefs + 1] = function()
+      if not btn.Parent then return false end
+      btn.Text = "  " .. labelFn()
+    end
   end
 
   -- Ueberschrift innerhalb eines Einstellungs-Blocks
@@ -1984,10 +1997,12 @@ local function mountGui()
         sl.Padding = UDim.new(0, 3); sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
         local spad = Instance.new("UIPadding", sf)
         spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
-        -- gruene Kante links: zeigt, dass der Block zum Modul darueber gehoert
-        local edge = Instance.new("Frame"); edge.Size = UDim2.new(0, 2, 1, 0)
-        edge.BackgroundColor3 = ACCENT; edge.BackgroundTransparency = 0.35
-        edge.BorderSizePixel = 0; edge.ZIndex = 2; edge.Parent = sf
+        -- gruene Kante links als Verlauf auf dem Hintergrund (ein echtes Frame mit
+        -- Size.Y.Scale=1 wuerde unter dem UIListLayout mit AutomaticSize zurueckkoppeln)
+        local eg = Instance.new("UIGradient", sf)
+        eg.Color = ColorSequence.new({
+          ColorSequenceKeypoint.new(0, ACCENT), ColorSequenceKeypoint.new(0.016, ACCENT),
+          ColorSequenceKeypoint.new(0.017, SET_BG), ColorSequenceKeypoint.new(1, SET_BG) })
         buildSettings(sf)
         if arrow then arrow.Text = "\xe2\x80\x93" end
       else
@@ -2275,17 +2290,8 @@ local function mountGui()
         function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
       makeToggleW(sf, 13, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
         function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
-      addInfo(sf, 14, "Map wird nur ausgehaengt und ist per 'Map zurueckholen' wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
+      addInfo(sf, 14, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
     end)
-  addAction(farm, function()
-      return g.SB_MAP_NUKED and ("Map weg (" .. #g.SB_MAP_PARKED .. " Teile)") or "Map wegraeumen (lokal)"
-    end,
-    function() parkMap() end)
-  addAction(farm, function()
-      if g.SB_TERR_WIPED then return "Map zurueckholen (Terrain: Rejoin)" end
-      return g.SB_MAP_LAST and ("Map zurueckgeholt (" .. tostring(g.SB_MAP_LAST) .. ")") or "Map zurueckholen"
-    end,
-    function() restoreMap() end)
   addModule(farm, "KD-Farm",
     function() return g.SB_KD end,
     function(v) g.SB_KD = v; if v then g.SB_KD_COUNT = 0; startKD() end end,
@@ -2446,7 +2452,9 @@ local function mountGui()
 
   -- === ArrayList (oben rechts, immer sichtbar) ===
   local arrayHolder = Instance.new("Frame")
-  arrayHolder.AnchorPoint = Vector2.new(1, 0); arrayHolder.Position = UDim2.new(1, -6, 0, 6)
+  local AL_INSET = 52
+  pcall(function() AL_INSET = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
+  arrayHolder.AnchorPoint = Vector2.new(1, 0); arrayHolder.Position = UDim2.new(1, -6, 0, AL_INSET)
   arrayHolder.Size = UDim2.fromOffset(0, 0); arrayHolder.AutomaticSize = Enum.AutomaticSize.XY
   arrayHolder.BackgroundTransparency = 1; arrayHolder.Parent = gui
   local al = Instance.new("UIListLayout", arrayHolder); al.SortOrder = Enum.SortOrder.LayoutOrder
@@ -2483,7 +2491,11 @@ local function mountGui()
   -- Refresh-Loop: Modul-Farben + ArrayList (Toggles via Hotkey/extern spiegeln)
   task.spawn(function()
     while gui.Parent do
-      for _, p in ipairs(moduleRefs) do pcall(p) end
+      -- rueckwaerts, damit tote Widgets (eingeklappte Settings) direkt rausfliegen
+      for i = #moduleRefs, 1, -1 do
+        local ok, alive = pcall(moduleRefs[i])
+        if ok and alive == false then table.remove(moduleRefs, i) end
+      end
       pcall(rebuildArray)
       -- Watchdog: Shotgun auch starten wenn der Toggle von aussen gesetzt wurde
       if g.SB_SHOT and not g.SB_SHOT_LOOP then pcall(startShotgun) end
@@ -2492,8 +2504,11 @@ local function mountGui()
   end)
 
   -- === Watermark oben links (Future-Style) ===
+  -- Roblox-Topbar (Logo links, Icons rechts) nicht ueberlappen: um deren Hoehe nach unten
+  local INSET = 52
+  pcall(function() INSET = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
   local wmBox = Instance.new("Frame")
-  wmBox.Position = UDim2.fromOffset(10, 6); wmBox.Size = UDim2.fromOffset(0, 40)
+  wmBox.Position = UDim2.fromOffset(10, INSET); wmBox.Size = UDim2.fromOffset(0, 40)
   wmBox.AutomaticSize = Enum.AutomaticSize.X; wmBox.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
   wmBox.BackgroundTransparency = 0.15; wmBox.BorderSizePixel = 0; wmBox.Parent = gui
   corner(wmBox, 2); stroke(wmBox, Color3.fromRGB(0, 0, 0), 0.4)
@@ -2506,23 +2521,15 @@ local function mountGui()
   wm.TextXAlignment = Enum.TextXAlignment.Left; wm.Text = "Spellbound   "; wm.Parent = wmBox
   local wmg = Instance.new("UIGradient", wm)
   wmg.Color = ColorSequence.new(ACCENT, Color3.fromRGB(120, 90, 220))
-  local wmSub = Instance.new("TextLabel")
-  wmSub.AnchorPoint = Vector2.new(1, 0.5); wmSub.Position = UDim2.new(1, -10, 0.5, 1)
-  wmSub.Size = UDim2.fromOffset(0, 18); wmSub.AutomaticSize = Enum.AutomaticSize.X
-  wmSub.BackgroundTransparency = 1; wmSub.Font = Enum.Font.GothamBold; wmSub.TextSize = 13
-  wmSub.TextColor3 = Color3.fromRGB(150, 154, 162); wmSub.TextXAlignment = Enum.TextXAlignment.Right
-  wmSub.Text = lp.Name; wmSub.Parent = wmBox
-  -- FPS + laufender Status (Farm-Ziel / Wand-Status) im Watermark mitfuehren
-  local fps, fpsAcc, fpsN = 60, 0, 0
-  table.insert(g.SB_CONNS, RunService.RenderStepped:Connect(function(dt)
-    fpsAcc = fpsAcc + dt; fpsN = fpsN + 1
-    if fpsAcc >= 0.5 then fps = math.floor(fpsN / fpsAcc + 0.5); fpsAcc, fpsN = 0, 0 end
-  end))
+  -- bewusst ohne Name/FPS/Status: das ueberlappt die Anzeigen des Spiels oben links
+  -- Topbar-Abstand laufend nachziehen (GetGuiInset ist direkt nach dem Join noch 0)
   moduleRefs[#moduleRefs + 1] = function()
-    local extra = ""
-    if g.SB_FARM and g.SB_FARM_TARGET then extra = "  Â·  â " .. tostring(g.SB_FARM_TARGET)
-    elseif g.SB_STATUS then extra = "  Â·  " .. tostring(g.SB_STATUS) end
-    wmSub.Text = lp.Name .. "  Â·  " .. fps .. " fps" .. extra
+    local ins = 52
+    pcall(function() ins = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
+    if wmBox.Position.Y.Offset ~= ins then
+      wmBox.Position = UDim2.fromOffset(10, ins)
+      arrayHolder.Position = UDim2.new(1, -6, 0, ins)
+    end
   end
 
   -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
