@@ -376,6 +376,89 @@ local function isStaff(pl)
   return pl and pl:GetAttribute("IsModerator") == true
 end
 
+--========================= Freunde (Ausnahmen, ueberleben den Rejoin) =========================--
+-- Freunde werden von Silent-Aim UND Autofarm komplett ausgelassen.
+-- getgenv() ist nach einem Rejoin weg, deshalb liegt die Liste zusaetzlich als JSON im
+-- Executor-Workspace. Gespeichert wird per UserId (Namen koennen sich aendern).
+local FRIENDS_FILE = "spellbound_friends.json"
+g.SB_FRIENDS   = g.SB_FRIENDS   or {}   -- [tostring(UserId)] = Anzeigename
+g.SB_RBXFRIEND = g.SB_RBXFRIEND or {}   -- Cache fuer IsFriendsWith (pro UserId)
+if g.SB_FRIEND_AUTO == nil then g.SB_FRIEND_AUTO = false end   -- echte Roblox-Freunde mitzaehlen
+
+local function saveFriends()
+  return pcall(function()
+    writefile(FRIENDS_FILE, Http:JSONEncode({ auto = g.SB_FRIEND_AUTO == true, list = g.SB_FRIENDS }))
+  end)
+end
+local function loadFriends()
+  local ok, data = pcall(function()
+    if isfile and isfile(FRIENDS_FILE) then return Http:JSONDecode(readfile(FRIENDS_FILE)) end
+    return nil
+  end)
+  if ok and type(data) == "table" then
+    if type(data.list) == "table" then g.SB_FRIENDS = data.list end
+    if data.auto ~= nil then g.SB_FRIEND_AUTO = data.auto == true end
+  end
+end
+if not g.SB_FRIENDS_LOADED then loadFriends(); g.SB_FRIENDS_LOADED = true end
+
+-- Wird pro Frame im Aim-Loop abgefragt -> IsFriendsWith nur einmal pro UserId.
+local function isFriend(pl)
+  if not pl then return false end
+  if g.SB_FRIENDS[tostring(pl.UserId)] then return true end
+  if g.SB_FRIEND_AUTO then
+    local c = g.SB_RBXFRIEND[pl.UserId]
+    if c == nil then
+      local ok, res = pcall(function() return lp:IsFriendsWith(pl.UserId) end)
+      c = (ok and res) and true or false
+      g.SB_RBXFRIEND[pl.UserId] = c
+    end
+    return c
+  end
+  return false
+end
+local function toggleFriend(pl)
+  local k = tostring(pl.UserId)
+  if g.SB_FRIENDS[k] then g.SB_FRIENDS[k] = nil else g.SB_FRIENDS[k] = pl.Name end
+  saveFriends()
+end
+local function friendCount()
+  local n = 0
+  for _ in pairs(g.SB_FRIENDS) do n = n + 1 end
+  return n
+end
+
+--========================= Auto-Leave bei Staff =========================--
+-- Moderator im Server -> alle Module aus und raus: entweder zurueck ins Menue (Kick mit
+-- neutraler Meldung, nichts das nach Cheat aussieht) oder direkt auf einen neuen Server.
+-- Einmal-Guard, damit nicht mehrere Staff-Joins gleichzeitig feuern.
+if g.SB_STAFF_LEAVE == nil then g.SB_STAFF_LEAVE = false end   -- Auto-Leave an/aus
+if g.SB_STAFF_HOP   == nil then g.SB_STAFF_HOP   = false end   -- Server-Hop statt Menue
+g.SB_STAFF_PANICKED = false                                    -- Guard beim Reload zuruecksetzen
+local function staffPanic(who)
+  if not g.SB_STAFF_LEAVE or g.SB_STAFF_PANICKED then return end
+  g.SB_STAFF_PANICKED = true
+  g.SB_LEAVE_REASON = tostring(who)
+  -- erst alles abschalten (falls der Leave scheitert, laeuft nichts weiter)
+  g.SB_AIM, g.SB_SAFE, g.SB_SHIELD, g.SB_CLASH, g.SB_DODGE = false, false, false, false, false
+  g.SB_FARM, g.SB_APPA_PENDING = false, false
+  task.spawn(function()
+    if g.SB_STAFF_HOP then
+      local ok = pcall(function() game:GetService("TeleportService"):Teleport(game.PlaceId, lp) end)
+      if ok then return end                       -- Hop laeuft; sonst faellt es auf Leave zurueck
+    end
+    pcall(function() lp:Kick("Verbindung unterbrochen.") end)
+  end)
+end
+-- Prueft alle bereits anwesenden Spieler (z.B. direkt beim Einschalten der Option).
+local function staffScan()
+  if not g.SB_STAFF_LEAVE then return end
+  for _, pl in ipairs(Players:GetPlayers()) do
+    if pl ~= lp and isStaff(pl) then staffPanic(pl.Name); return true end
+  end
+  return false
+end
+
 --========================= Aim-Helfer (geteilt: Silent-Aim + Autofarm) =========================--
 -- Projektilgeschwindigkeit des AKTUELL geladenen Spells automatisch ablesen.
 local function spellSpeed()
@@ -453,7 +536,8 @@ local function startAim()
         local facExempt = fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name]
         -- Staff ausgenommen? (Moderatoren) -> ueberspringen, Keep-Target hebt es ebenfalls auf
         local staffExempt = g.SB_AIM_SKIP_STAFF and isStaff(pl) and not g.SB_AIM_KEEP[pl.Name]
-        if not facExempt and not staffExempt then consider(pl.Character, pl.Name) end
+        -- Freunde (eigene Liste / echte Roblox-Freunde) werden nie anvisiert
+        if not facExempt and not staffExempt and not isFriend(pl) then consider(pl.Character, pl.Name) end
       end
     end
     -- NPCs (Workspace.Terrain.characters) nur wenn NPC-Aim aktiv
@@ -1024,6 +1108,7 @@ local function farmTargets()
           if g.SB_AIM_EXEMPT[pl.Name] then skip = true end
           if fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name] then skip = true end
         end
+        if isFriend(pl) then skip = true end
         if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
         if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
         if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
@@ -1557,6 +1642,70 @@ local function mountGui()
   addModule(util, "Chams (sichtbar)",
     function() return g.SB_CHAMS end,
     function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
+  -- Freunde: von Silent-Aim UND Autofarm ausgenommen, per UserId in einer Datei gemerkt
+  addAction(util, function() return "Freunde (" .. friendCount() .. ")" end,
+    function() end,
+    function(sf)
+      makeToggleW(sf, 1, "Roblox-Freunde automatisch",
+        function() return g.SB_FRIEND_AUTO == true end,
+        function() g.SB_FRIEND_AUTO = not g.SB_FRIEND_AUTO; saveFriends() end)
+      local l1 = Instance.new("TextLabel"); l1.Size = UDim2.new(1, -12, 0, 16); l1.LayoutOrder = 2
+      l1.BackgroundTransparency = 1; l1.Font = Enum.Font.GothamBold; l1.TextSize = 11
+      l1.TextColor3 = Color3.fromRGB(160, 160, 180); l1.TextXAlignment = Enum.TextXAlignment.Left
+      l1.Text = "Im Server:"; l1.Parent = sf
+      local others = {}
+      for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
+      table.sort(others, function(a, b) return a.Name:lower() < b.Name:lower() end)
+      if #others == 0 then
+        local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -12, 0, 18); none.LayoutOrder = 3
+        none.BackgroundTransparency = 1; none.Font = Enum.Font.Gotham; none.TextSize = 11
+        none.TextColor3 = Color3.fromRGB(150, 150, 165); none.TextXAlignment = Enum.TextXAlignment.Left
+        none.Text = "  keine anderen Spieler"; none.Parent = sf
+      else
+        local ROW, MAXR = 22, 6
+        local scr = Instance.new("ScrollingFrame"); scr.LayoutOrder = 3
+        scr.Size = UDim2.new(1, 0, 0, math.min(#others, MAXR) * ROW); scr.BackgroundTransparency = 1
+        scr.BorderSizePixel = 0; scr.ScrollBarThickness = 4; scr.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
+        scr.CanvasSize = UDim2.fromOffset(0, #others * ROW); scr.ScrollingDirection = Enum.ScrollingDirection.Y
+        scr.Parent = sf
+        local sl = Instance.new("UIListLayout", scr); sl.SortOrder = Enum.SortOrder.LayoutOrder
+        for i, pl in ipairs(others) do
+          makeToggleW(scr, i, pl.Name,
+            function() return g.SB_FRIENDS[tostring(pl.UserId)] ~= nil end,
+            function() toggleFriend(pl) end)
+        end
+      end
+      -- gespeicherte Freunde, die gerade nicht im Server sind (Haken weg = loeschen)
+      local off = {}
+      for id, nm in pairs(g.SB_FRIENDS) do
+        if not Players:GetPlayerByUserId(tonumber(id) or 0) then off[#off + 1] = { id = id, nm = nm } end
+      end
+      table.sort(off, function(a, b) return tostring(a.nm):lower() < tostring(b.nm):lower() end)
+      if #off > 0 then
+        local l2 = Instance.new("TextLabel"); l2.Size = UDim2.new(1, -12, 0, 16); l2.LayoutOrder = 4
+        l2.BackgroundTransparency = 1; l2.Font = Enum.Font.GothamBold; l2.TextSize = 11
+        l2.TextColor3 = Color3.fromRGB(160, 160, 180); l2.TextXAlignment = Enum.TextXAlignment.Left
+        l2.Text = "Gespeichert (offline):"; l2.Parent = sf
+        local ROW, MAXR = 22, 5
+        local scr2 = Instance.new("ScrollingFrame"); scr2.LayoutOrder = 5
+        scr2.Size = UDim2.new(1, 0, 0, math.min(#off, MAXR) * ROW); scr2.BackgroundTransparency = 1
+        scr2.BorderSizePixel = 0; scr2.ScrollBarThickness = 4; scr2.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
+        scr2.CanvasSize = UDim2.fromOffset(0, #off * ROW); scr2.ScrollingDirection = Enum.ScrollingDirection.Y
+        scr2.Parent = sf
+        local sl2 = Instance.new("UIListLayout", scr2); sl2.SortOrder = Enum.SortOrder.LayoutOrder
+        for i, e in ipairs(off) do
+          makeToggleW(scr2, i, tostring(e.nm),
+            function() return g.SB_FRIENDS[e.id] ~= nil end,
+            function() g.SB_FRIENDS[e.id] = (g.SB_FRIENDS[e.id] == nil) and e.nm or nil; saveFriends() end)
+        end
+      end
+      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 54); fi.LayoutOrder = 6
+      fi.BackgroundTransparency = 1; fi.Font = Enum.Font.Gotham; fi.TextSize = 11
+      fi.TextColor3 = Color3.fromRGB(150, 150, 170); fi.TextWrapped = true
+      fi.TextXAlignment = Enum.TextXAlignment.Left
+      fi.Text = "Freunde werden von Silent-Aim und Autofarm ausgelassen. Gespeichert per UserId in spellbound_friends.json - bleibt nach Rejoin."
+      fi.Parent = sf
+    end)
   -- Staff-Optionen (aufklappbar): Silent-Aim fuer Staff aussetzen + Staff hervorheben
   addAction(util, function() return "Staff-Optionen" end,
     function() end,
@@ -1567,11 +1716,17 @@ local function mountGui()
       makeToggleW(sf, 2, "Staff hervorheben",
         function() return g.SB_STAFF_ESP == true end,
         function() g.SB_STAFF_ESP = not g.SB_STAFF_ESP; if g.SB_STAFF_ESP then startVisuals() end end)
-      local info = Instance.new("TextLabel"); info.Size = UDim2.new(1, -12, 0, 40); info.LayoutOrder = 3
+      makeToggleW(sf, 3, "Auto-Leave bei Staff",
+        function() return g.SB_STAFF_LEAVE == true end,
+        function() g.SB_STAFF_LEAVE = not g.SB_STAFF_LEAVE; if g.SB_STAFF_LEAVE then staffScan() end end)
+      makeToggleW(sf, 4, "Server-Hop statt Leave",
+        function() return g.SB_STAFF_HOP == true end,
+        function() g.SB_STAFF_HOP = not g.SB_STAFF_HOP end)
+      local info = Instance.new("TextLabel"); info.Size = UDim2.new(1, -12, 0, 68); info.LayoutOrder = 5
       info.BackgroundTransparency = 1; info.Font = Enum.Font.Gotham; info.TextSize = 11
       info.TextColor3 = Color3.fromRGB(150, 150, 170); info.TextWrapped = true
       info.TextXAlignment = Enum.TextXAlignment.Left
-      info.Text = "Staff = Moderatoren (Attribut IsModerator). Bei ESP-Namen steht 'Moderator' in Blau unter dem Namen."
+      info.Text = "Staff = Moderatoren (Attribut IsModerator). Bei ESP-Namen steht 'Moderator' in Blau unter dem Namen. Auto-Leave schaltet erst alle Module ab und geht dann raus (Server-Hop: direkt neuer Server)."
       info.Parent = sf
     end)
 
@@ -1677,6 +1832,7 @@ local function mountGui()
     a.BorderSizePixel = 0; a.Font = Enum.Font.GothamBlack; a.TextSize = 22
     a.TextColor3 = Color3.fromRGB(255, 40, 40)
     a.Text = "   STAFF JOINED: " .. tostring(name) .. "   "; a.ZIndex = 80; a.Parent = gui
+    staffPanic(name)                       -- Auto-Leave (macht nur was, wenn die Option an ist)
     Instance.new("UICorner", a).CornerRadius = UDim.new(0, 6)
     local st = Instance.new("UIStroke", a); st.Color = Color3.fromRGB(255, 40, 40); st.Thickness = 1.5
     task.delay(3, function() pcall(function() a:Destroy() end) end)
