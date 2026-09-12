@@ -8,7 +8,8 @@
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
 --   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
 --       Abstand) aus den eigenen Bind-Sets, alphabetisch rotierend.
---   SNIPE (M): TP unter das Silent-Aim-Ziel, EIN Safe-Combat-Spell nach oben, sofort zurueck.
+--   SNIPE (M): Tarnschuss aufs Silent-Aim-Ziel, punktgenau zum Einschlag TP unter das Ziel,
+--       zweiter Spell von unten, sofort zurueck auf den Startpunkt.
 --   AUTOFARM (K): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
 --       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
@@ -1014,6 +1015,23 @@ local function carveTerrain(pos, radius)
   end)
 end
 
+-- Genau EINE Blase wieder zumachen (gleicher Key wie beim Schneiden) - fuer Aktionen, die
+-- nur kurz ein Loch brauchen (Snipe): schneiden, schiessen, sofort wieder zu.
+local function uncarveTerrain(pos, radius)
+  local terr = workspace.Terrain
+  local r = math.max(1, math.floor(radius / 4))
+  local cx, cy, cz = math.floor(pos.X / 4), math.floor(pos.Y / 4), math.floor(pos.Z / 4)
+  local mn = Vector3int16.new(cx - r, cy - r, cz - r)
+  local key = mn.X .. "," .. mn.Y .. "," .. mn.Z .. "/" .. r
+  local snap = g.SB_TERR_SNAP[key]
+  if not snap or not snap.reg then return false end
+  local ok = pcall(function() terr:PasteRegion(snap.reg, snap.corner, true) end)
+  pcall(function() snap.reg:Destroy() end)
+  g.SB_TERR_SNAP[key] = nil
+  g.SB_TERR_COUNT = math.max((tonumber(g.SB_TERR_COUNT) or 1) - 1, 0)
+  return ok
+end
+
 -- Map + gesicherte Terrain-Blasen zurueckholen, ohne Rejoin.
 local function restoreMap()
   local parts, bubbles = 0, 0
@@ -1250,33 +1268,92 @@ local function doSnipe()
   startSelector()                                   -- haelt g.SB_REFS/Wand-Closures aktuell
   task.spawn(function()
     local home = hrp.CFrame
+    local carvedAt, carvedR                          -- gemerkt, damit das Loch wieder zugeht
+    local ROT = g.SB_SAFE_ROT or {}
+    local function nextSpell()                       -- naechster Slot der Safe-Combat-Rotation
+      local idx = tonumber(g.SB_ROT_IDX) or 1
+      local sp  = ROT[idx] or ROT[1]
+      g.SB_ROT_IDX = (idx % math.max(#ROT, 1)) + 1
+      return sp
+    end
+    local function speedOf(name)
+      local sd = okSp and spellsMod and spellsMod.list and spellsMod.list[name]
+      return tonumber(sd and sd.speed) or 300
+    end
+
+    -- 1) TARNSCHUSS: ganz normaler Cast von der eigenen Position auf das Ziel. Sieht nach
+    --    einem gewoehnlichen Angriff aus und liefert das Zeitfenster fuer den echten Schuss.
+    local decoy  = nextSpell()
+    local flight = 0
+    if decoy then
+      flight = (root.Position - hrp.Position).Magnitude / speedOf(decoy)
+      pcall(farmCast, root, hum, decoy)
+      g.SB_SNIPE_STATUS = "Tarnschuss " .. decoy .. " -> " .. pl.Name
+    end
+
+    -- 2) So lange warten, dass der Schuss von unten GENAU mit dem Einschlag des Tarnschusses
+    --    zusammenfaellt: Flugzeit minus dem, was die Sequenz selbst braucht
+    --    (Spell-Load + TP-Delay + Flugzeit der Tiefe).
+    local depth     = tonumber(g.SB_SNIPE_DEPTH) or 15
+    local killSpell = nextSpell()
+    local prep      = 0.07 + (tonumber(g.SB_SNIPE_DELAY) or 0.05) + depth / speedOf(killSpell)
+    local waitT     = flight - prep
+    if waitT > 0 then task.wait(waitT) end
+
+    -- 3) ASSASSINEN-SEQUENZ, getarnt vom Einschlag des ersten Spells
     pcall(function()
-      local depth = tonumber(g.SB_SNIPE_DEPTH) or 15
-      local spot  = root.Position - Vector3.new(0, depth, 0)
+      if not (root.Parent and hum.Health > 0) then
+        g.SB_SNIPE_STATUS = pl.Name .. ": Tarnschuss hat gereicht"
+        return
+      end
+      local spot = root.Position - Vector3.new(0, depth, 0)
       if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
       if g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
-        carveTerrain((spot + root.Position) * 0.5, depth * 0.5 + 14)
+        carvedAt, carvedR = (spot + root.Position) * 0.5, depth * 0.5 + 14
+        carveTerrain(carvedAt, carvedR)
       end
       task.wait(tonumber(g.SB_SNIPE_DELAY) or 0.05)
-      local ROT   = g.SB_SAFE_ROT or {}
-      local idx   = tonumber(g.SB_ROT_IDX) or 1
-      local spell = ROT[idx] or ROT[1]
-      if spell and root.Parent and hum.Health > 0 then
-        g.SB_ROT_IDX = (idx % math.max(#ROT, 1)) + 1   -- naechstes Mal der naechste Slot
-        if farmCast(root, hum, spell) then
+      if killSpell and root.Parent and hum.Health > 0 then
+        if farmCast(root, hum, killSpell) then
           g.SB_SNIPE_COUNT  = (tonumber(g.SB_SNIPE_COUNT) or 0) + 1
-          g.SB_SNIPE_STATUS = pl.Name .. " / " .. spell
+          g.SB_SNIPE_STATUS = pl.Name .. " / " .. tostring(decoy) .. " + " .. killSpell
         else
           g.SB_SNIPE_STATUS = "Cast fehlgeschlagen"
         end
       end
     end)
-    -- IMMER zurueck nach Hause + entankern, auch wenn oben etwas schiefging
-    pcall(function()
-      hrp.CFrame = home
-      hrp.AssemblyLinearVelocity = Vector3.zero
-      hrp.Anchored = false
+    -- IMMER zurueck nach Hause: das GANZE Modell bewegen (PivotTo), nicht nur das HRP - sonst
+    -- steht man fuer die anderen wieder daheim, auf dem eigenen Schirm aber noch unter der Map.
+    local function goHome()
+      local ch2  = lp.Character
+      local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+      if not (ch2 and hrp2) then return end
+      pcall(function() ch2:PivotTo(home) end)
+      hrp2.AssemblyLinearVelocity = Vector3.zero
+      hrp2.Anchored = false
+      local hum2 = ch2:FindFirstChildOfClass("Humanoid")
+      local cam  = workspace.CurrentCamera
+      if cam and hum2 and cam.CameraSubject ~= hum2 then cam.CameraSubject = hum2 end
+    end
+    goHome()
+    task.spawn(function()
+      for _ = 1, 4 do                                -- Nachhalten gegen Physik-Rubberband
+        RunService.Heartbeat:Wait()
+        local ch2  = lp.Character
+        local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+        if hrp2 then
+          if (hrp2.Position - home.Position).Magnitude > 3 then goHome() end
+          if hrp2.Anchored then hrp2.Anchored = false end
+        end
+      end
     end)
+    -- Terrain-Blase wieder zumachen, sobald der Spell durch ist (sonst bleibt das Loch offen)
+    if carvedAt then
+      task.spawn(function()
+        task.wait(0.45)
+        pcall(uncarveTerrain, carvedAt, carvedR)
+      end)
+    end
     g.SB_SNIPE_BUSY = false
   end)
 end
@@ -1950,7 +2027,8 @@ local function mountGui()
       sn.TextXAlignment = Enum.TextXAlignment.Left; sn.Parent = sf
       moduleRefs[#moduleRefs + 1] = function()
         if not sn.Parent then return end
-        sn.Text = "M: unter das Silent-Aim-Ziel TP, EIN Safe-Combat-Spell nach oben, sofort zurueck. "
+        sn.Text = "M: erst ein normaler Tarnschuss, im Moment des Einschlags TP unter das Ziel + "
+          .. "zweiter Spell von unten, sofort zurueck. "
           .. "zuletzt: " .. tostring(g.SB_SNIPE_STATUS or "-") .. " (" .. (tonumber(g.SB_SNIPE_COUNT) or 0) .. ")"
       end
     end)
