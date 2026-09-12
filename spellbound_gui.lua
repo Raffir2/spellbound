@@ -6,6 +6,9 @@
 --   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
+--   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
+--       Abstand) aus den eigenen Bind-Sets, alphabetisch rotierend.
+--   SNIPE (M): TP unter das Silent-Aim-Ziel, EIN Safe-Combat-Spell nach oben, sofort zurueck.
 --   AUTOFARM (K): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
 --       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
@@ -33,6 +36,14 @@ g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
 g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
 g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel % ALLER Cheat-Aktionen failen absichtlich
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
+g.SB_SHOT, g.SB_SHOT_LOOP = false, false          -- Shotgun (6er-Burst) beim Reload aus
+g.SB_SHOT_HOOKED, g.SB_SHOT_REQ = false, false    -- Klick-Trigger wird beim Reload neu gelegt
+g.SB_SHOT_IDX   = tonumber(g.SB_SHOT_IDX)   or 1  -- Position in der alphabetischen Liste
+g.SB_SHOT_IV    = tonumber(g.SB_SHOT_IV)    or 0.02  -- Abstand: 1 Frame, kleinster sinnvoller Wert
+g.SB_SHOT_BURST = tonumber(g.SB_SHOT_BURST) or 6     -- Schuesse pro Klick (Rate-Limit!)
+if g.SB_SHOT_REEQUIP == nil then g.SB_SHOT_REEQUIP = true end  -- Stab vor jedem Schuss neu ziehen
+if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells mitnehmen
+g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht "haengend"
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
 pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
@@ -1048,9 +1059,9 @@ end
 -- Ein Cast auf ein Ziel-Root (ohne Mausklick), MIT Silent-Aim: der Zielpunkt kommt aus
 -- derselben Lead-Rechnung wie beim Silent-Aim (aimPointFor) und wird zusaetzlich auf die
 -- Spiel-Maus gelegt, damit auch der interne Fire-Pfad genau dorthin zielt.
-local function farmCast(root, hum)
+local function farmCast(root, hum, spellOverride)
   if legitFail() then return false end             -- Legitness: Cast absichtlich verschlucken
-  local spell  = resolveSpell(g.SB_FARM_SPELL or "avada kedavra")
+  local spell  = resolveSpell(spellOverride or g.SB_FARM_SPELL or "avada kedavra")
   local refs   = g.SB_REFS
   local myHRP  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
   local origin = myHRP and myHRP.Position or root.Position
@@ -1182,6 +1193,283 @@ local function startFarm()
   end)
 end
 
+--===================== SNIPE (Taste M): 1 Ziel, unter die Map, 1 Spell =====================--
+-- Einzelschuss-Variante des Autofarms: nimmt das aktuelle Silent-Aim-Ziel (sonst den Spieler
+-- am naechsten zum Cursor), merkt sich die eigene Position, teleportiert direkt UNTER das Ziel,
+-- feuert dort EINEN Spell aus der Safe-Combat-Rotation nach oben (mit Silent-Aim-Vorhalt) und
+-- ist sofort wieder zuhause. Gesamtdauer ~0.1s -> faellt praktisch nicht auf.
+g.SB_SNIPE_DEPTH = tonumber(g.SB_SNIPE_DEPTH) or 15    -- Studs unter dem Ziel
+g.SB_SNIPE_DELAY = tonumber(g.SB_SNIPE_DELAY) or 0.05  -- Wartezeit nach dem TP vor dem Cast
+if g.SB_SNIPE_CARVE == nil then g.SB_SNIPE_CARVE = true end  -- Terrain-Blase (sonst blockt der Boden)
+
+-- Ziel: erst das Silent-Aim-Ziel, sonst der Spieler am naechsten zum Cursor.
+local function snipePickTarget()
+  local function alive(pl)
+    local ch  = pl and pl.Character
+    local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+    local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+    if root and hum and hum.Health > 0 then return root, hum end
+  end
+  local name = g.SB_AIM_TARGET
+  if name then
+    local pl = Players:FindFirstChild(name)
+    if pl and alive(pl) then return pl end
+  end
+  local cam   = workspace.CurrentCamera
+  local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if not (cam and myHRP) then return nil end
+  local mp = UIS:GetMouseLocation()
+  local best, bestD
+  for _, pl in ipairs(Players:GetPlayers()) do
+    if pl ~= lp and not (g.SB_AIM_EXEMPT and g.SB_AIM_EXEMPT[pl.Name]) then
+      local root = alive(pl)
+      if root then
+        local sp, onScreen = cam:WorldToViewportPoint(root.Position)
+        local wd = (root.Position - myHRP.Position).Magnitude
+        if onScreen and sp.Z > 0 and wd <= (tonumber(g.SB_AIM_RANGE) or 500) then
+          local sd = (Vector2.new(sp.X, sp.Y) - Vector2.new(mp.X, mp.Y)).Magnitude
+          if not bestD or sd < bestD then best, bestD = pl, sd end
+        end
+      end
+    end
+  end
+  return best
+end
+
+local function doSnipe()
+  if g.SB_SNIPE_BUSY then return end
+  if g.SB_FARM then g.SB_SNIPE_STATUS = "Autofarm laeuft"; return end   -- der fasst die Position selbst an
+  local pl = snipePickTarget()
+  local ch   = pl and pl.Character
+  local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+  local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+  local hrp  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if not (pl and root and hum and hrp) then g.SB_SNIPE_STATUS = "kein Ziel"; return end
+  if isStunnedOrBound() or isRagdolled() then g.SB_SNIPE_STATUS = "gestunnt"; return end
+  g.SB_SNIPE_BUSY = true
+  startSelector()                                   -- haelt g.SB_REFS/Wand-Closures aktuell
+  task.spawn(function()
+    local home = hrp.CFrame
+    pcall(function()
+      local depth = tonumber(g.SB_SNIPE_DEPTH) or 15
+      local spot  = root.Position - Vector3.new(0, depth, 0)
+      if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
+      if g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
+        carveTerrain((spot + root.Position) * 0.5, depth * 0.5 + 14)
+      end
+      task.wait(tonumber(g.SB_SNIPE_DELAY) or 0.05)
+      local ROT   = g.SB_SAFE_ROT or {}
+      local idx   = tonumber(g.SB_ROT_IDX) or 1
+      local spell = ROT[idx] or ROT[1]
+      if spell and root.Parent and hum.Health > 0 then
+        g.SB_ROT_IDX = (idx % math.max(#ROT, 1)) + 1   -- naechstes Mal der naechste Slot
+        if farmCast(root, hum, spell) then
+          g.SB_SNIPE_COUNT  = (tonumber(g.SB_SNIPE_COUNT) or 0) + 1
+          g.SB_SNIPE_STATUS = pl.Name .. " / " .. spell
+        else
+          g.SB_SNIPE_STATUS = "Cast fehlgeschlagen"
+        end
+      end
+    end)
+    -- IMMER zurueck nach Hause + entankern, auch wenn oben etwas schiefging
+    pcall(function()
+      hrp.CFrame = home
+      hrp.AssemblyLinearVelocity = Vector3.zero
+      hrp.Anchored = false
+    end)
+    g.SB_SNIPE_BUSY = false
+  end)
+end
+
+--========================= SHOTGUN (Troll) =========================--
+-- Feuert NIE von selbst: nur ein echter Linksklick (InputBegan) loest EINEN Burst aus —
+-- genau SB_SHOT_BURST (=6) Spells hintereinander, Takt SB_SHOT_IV (=0.02s = 1 Frame, der
+-- kleinste Wert der noch je Frame einen eigenen Cast ergibt). Danach ist Schluss bis zum
+-- naechsten Klick: Dauerfeuer kappt der Server ("hard spell over time limit").
+-- WELCHE Spells: nur die aus den eigenen Spell-Bind-Sets (= die man wirklich hat; eine
+-- Besitz-Liste gibt es clientseitig nicht, spellPermissions erlaubt pauschal fast alles) und
+-- davon nur die COMBAT-Spells (hostile). Damit fliegen Heal/Buff/Utility (protego, episkey,
+-- rennervate, lumos...), Movement (appa/ascendio) und Elder-Wand-Spells automatisch raus.
+-- Sie laufen alphabetisch durch: der naechste Burst macht dort weiter, wo der letzte aufhoerte.
+-- Vor JEDEM Schuss wird der Stab einmal aus- und wieder eingepackt (Humanoid:UnequipTools/
+-- EquipTool) -> jeder Cast sieht nach frischem Equip+Load+Fire aus statt nach Dauerfeuer.
+local SHOT_SKIP = {
+  ["appa"] = true, ["appa duo"] = true, ["ascendio"] = true,   -- Teleport / Hochschleudern
+}
+local function shotSpellPool()
+  local list, seen = {}, {}
+  local okB, bindSets = pcall(function() return require(RS.shared.modules.spellBindSets) end)
+  if okB and bindSets and okSp and spellsMod and spellsMod.list then
+    local okD, data = pcall(function() return bindSets:getSpellBindSetsData() end)
+    if okD and type(data) == "table" then
+      for _, set in pairs(data) do
+        if type(set) == "table" then
+          for _, incantation in pairs(set) do
+            local name = tostring(incantation)                 -- "__empty" ist nicht in spells.list
+            local d = spellsMod.list[name]
+            if type(d) == "table" and d.hostile == true and not seen[name]
+               and not SHOT_SKIP[name] and d.elderOnly ~= true and d.elder ~= true then
+              seen[name] = true; list[#list + 1] = name
+            end
+          end
+        end
+      end
+    end
+  end
+  table.sort(list)                       -- alphabetisch
+  return list
+end
+
+-- Stab einmal weg- und wieder einpacken, gibt das (wieder equippte) Tool zurueck
+local function shotCycleWand()
+  local char = lp.Character
+  local hum  = char and char:FindFirstChildOfClass("Humanoid")
+  if not (char and hum and hum.Health > 0) then return nil end
+  local wand = char:FindFirstChildWhichIsA("Tool")
+  if not wand then
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    wand = bp and bp:FindFirstChildWhichIsA("Tool")
+  end
+  if not wand then return nil end
+  -- Bei sehr kleinem Takt (<0.05s) ohne Frame-Pause zwischen Aus- und Einpacken arbeiten,
+  -- sonst sind die zwei Heartbeats (~0.03s) der Flaschenhals und der Takt greift gar nicht.
+  local slow = (tonumber(g.SB_SHOT_IV) or 0.02) >= 0.05
+  if g.SB_SHOT_REEQUIP ~= false and wand.Parent == char then
+    pcall(function() hum:UnequipTools() end)
+    if slow then RunService.Heartbeat:Wait() end
+  end
+  if wand.Parent ~= char then
+    pcall(function() hum:EquipTool(wand) end)
+    if slow then RunService.Heartbeat:Wait() end
+  end
+  return char:FindFirstChildWhichIsA("Tool") or wand
+end
+
+-- Zielpunkt: Silent-Aim-Ziel falls aktiv, sonst der echte Cursor
+local function shotTarget()
+  local m = g.SB_MOUSE
+  if not m then
+    local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
+    g.SB_MOUSE = okM and pm and pm:GetMouse() or nil
+    m = g.SB_MOUSE
+  end
+  local hit = m and m.Hit
+  if hit then return hit.Position end
+  return realMouseHit()
+end
+
+-- feuert EINEN beliebigen Spell (normal oder unique) auf target
+local function castAnySpell(wand, spell, target)
+  local sd = okSp and spellsMod and spellsMod.list and spellsMod.list[spell]
+  if sd and sd.unique then
+    if g.SB_SHOT_UNIQUE == false then return false end
+    if not (okPk and packets and packets.loadSpellReplication and packets.uniqueSpellReplication) then return false end
+    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if not hrp then return false end
+    local guid = Http:GenerateGUID(false)
+    if okReg and registry then registry[guid] = true end
+    packets.loadSpellReplication.send({ spell = spell, enabled = true, wand = wand })
+    packets.uniqueSpellReplication.send({
+      serverTimeAtFire = workspace:GetServerTimeNow(), spellId = guid,
+      origin = hrp.Position, target = target or (hrp.Position + hrp.CFrame.LookVector * 60),
+      spellName = spell, wand = wand,
+    })
+    return true
+  end
+  local st = g.SB_REFS and g.SB_REFS.state
+  return castReplicated(st, wand, spell, target)
+end
+
+-- ein Schuss: naechster Spell der Liste, Stab neu ziehen, feuern, Index weiterdrehen
+local function shotFireOne(list)
+  if isRagdolled() then return false end             -- ragdollt -> kein Equip moeglich
+  local idx = tonumber(g.SB_SHOT_IDX) or 1
+  if idx < 1 or idx > #list then idx = 1 end
+  local spell = list[idx]
+  local wand  = shotCycleWand()
+  if not wand then return false end
+  if castAnySpell(wand, spell, shotTarget()) then
+    g.SB_SHOT_COUNT = (tonumber(g.SB_SHOT_COUNT) or 0) + 1
+  else
+    g.SB_SHOT_FAILS = (tonumber(g.SB_SHOT_FAILS) or 0) + 1
+    g.SB_SHOT_LASTFAIL = spell
+  end
+  g.SB_SHOT_SPELL = spell
+  g.SB_SHOT_IDX = (idx % #list) + 1                  -- alphabetisch weiter, dann von vorn
+  return true
+end
+
+local function startShotgun()
+  -- Klick-Trigger als EVENT (nicht pollen): ein kurzer Klick darf nie verschluckt werden.
+  if not g.SB_SHOT_HOOKED then
+    g.SB_SHOT_HOOKED = true
+    table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
+      if gp or g.SB_GUI_OPEN then return end                  -- Klicks im ClickGUI feuern nicht
+      if i.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+      if not g.SB_SHOT then return end
+      if tick() < (tonumber(g.SB_SHOT_ARMED_AT) or 0) then return end  -- Einschalt-Klick zaehlt nicht
+      g.SB_SHOT_REQ = true                                   -- genau EIN Burst pro Klick
+      g.SB_SHOT_CLICKS = (tonumber(g.SB_SHOT_CLICKS) or 0) + 1
+    end))
+  end
+  if g.SB_SHOT_LOOP then return end
+  g.SB_SHOT_LOOP = true
+  g.SB_SHOT_COUNT = tonumber(g.SB_SHOT_COUNT) or 0
+  g.SB_SHOT_REQ = false
+  g.SB_SHOT_ARMED_AT = tick() + 0.3   -- NIE von selbst feuern: erst 0.3s nach dem Einschalten scharf
+  task.spawn(function()
+    local list = shotSpellPool()
+    g.SB_SHOT_LIST = list
+    while g.SB_SHOT do
+      if g.SB_SHOT_REQ then
+        g.SB_SHOT_REQ = false
+        list = shotSpellPool()                      -- Bind-Sets koennen sich geaendert haben
+        g.SB_SHOT_LIST = list
+        if #list == 0 then
+          g.SB_SHOT_SPELL = "keine Combat-Spells gebunden"
+        else
+          local n = math.max(1, math.floor(tonumber(g.SB_SHOT_BURST) or 6))
+          g.SB_SHOT_BURSTLEFT = n
+          local tBurst = tick()
+          for i = 1, n do
+            if not g.SB_SHOT then break end
+            -- tick() = echte Wall-Clock; os.clock() laeuft im Executor langsamer als Echtzeit
+            -- und haette den Abstand auf ~0.055s zusammengeschoben (= Rate-Limit-Falle).
+            local t0 = tick()
+            pcall(shotFireOne, list)
+            g.SB_SHOT_BURSTLEFT = n - i
+            if i < n then
+              local rest = (tonumber(g.SB_SHOT_IV) or 0.02) - (tick() - t0)
+              while rest > 0 do                     -- task.wait kann kuerzer zurueckkommen
+                task.wait(rest)
+                rest = (tonumber(g.SB_SHOT_IV) or 0.02) - (tick() - t0)
+              end
+            end
+          end
+          g.SB_SHOT_LASTDUR = tick() - tBurst                 -- echte Dauer des Bursts
+          -- Nach dem letzten Schuss den Stab garantiert wieder in die Hand geben (bei sehr
+          -- kleinem Takt bleibt er sonst im Rucksack liegen).
+          task.spawn(function()
+            for _ = 1, 3 do
+              RunService.Heartbeat:Wait()
+              local ch = lp.Character
+              if ch and ch:FindFirstChildWhichIsA("Tool") then return end
+              local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+              local bp  = lp:FindFirstChildOfClass("Backpack")
+              local bw  = bp and bp:FindFirstChildWhichIsA("Tool")
+              if hum and bw then pcall(function() hum:EquipTool(bw) end) end
+            end
+          end)
+          g.SB_SHOT_REQ = false                               -- Klicks WAEHREND des Bursts zaehlen nicht
+        end
+      end
+      RunService.Heartbeat:Wait()
+    end
+    g.SB_SHOT_LOOP = false
+    g.SB_SHOT_BURSTLEFT = 0
+  end)
+end
+
 --========================= Spell-Liste (fuer Dropdowns) =========================--
 local function getSpellList()
   local okS, spells = pcall(function() return require(RS.shared.modules.spells) end)
@@ -1232,7 +1520,11 @@ local function mountGui()
   clickRoot.BackgroundTransparency = 0.4; clickRoot.BorderSizePixel = 0
   clickRoot.Active = true; clickRoot.Visible = false; clickRoot.Parent = gui
   local guiOpen = false
-  local function setOpen(v) guiOpen = v; clickRoot.Visible = v; if not v then closeList() end end
+  local function setOpen(v)
+    guiOpen = v; g.SB_GUI_OPEN = v          -- Shotgun feuert nicht bei Klicks im ClickGUI
+    clickRoot.Visible = v; if not v then closeList() end
+  end
+  g.SB_GUI_OPEN = false
   -- Streamproof: blendet ALLE Visuals aus, bis erneut gedrueckt (Hotkey: Bild-Ab / PageDown).
   -- gui.Enabled=false versteckt Panel, Watermark UND ArrayList in einem Rutsch; das ESP/Chams-
   -- Overlay (SB_TeamESP) wird separat abgeschaltet. Die Cheats laufen unsichtbar weiter.
@@ -1609,6 +1901,60 @@ local function mountGui()
       fi.Parent = sf
     end)
 
+  -- === Troll-Panel ===
+  local troll = makePanel("Troll", 26, 40 + 200)
+  addModule(troll, "Shotgun",
+    function() return g.SB_SHOT end,
+    function(v) g.SB_SHOT = v; if v then startShotgun() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Burst", 1, 12, function() return tonumber(g.SB_SHOT_BURST) or 6 end,
+        function(v) g.SB_SHOT_BURST = math.floor(v + 0.5) end,
+        function(v) return math.floor(v + 0.5) .. " Spells" end)
+      makeSliderW(sf, 2, "Takt", 0, 0.5, function() return tonumber(g.SB_SHOT_IV) or 0.02 end,
+        function(v) g.SB_SHOT_IV = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return v <= 0.001 and "max. Speed" or string.format("%.2fs", v) end)
+      makeToggleW(sf, 3, "Stab re-equip", function() return g.SB_SHOT_REEQUIP ~= false end,
+        function() g.SB_SHOT_REEQUIP = not (g.SB_SHOT_REEQUIP ~= false) end)
+      local st = Instance.new("TextLabel"); st.Size = UDim2.new(1, -12, 0, 46); st.LayoutOrder = 4
+      st.BackgroundTransparency = 1; st.Font = Enum.Font.Gotham; st.TextSize = 11
+      st.TextColor3 = Color3.fromRGB(150, 150, 170); st.TextWrapped = true
+      st.TextXAlignment = Enum.TextXAlignment.Left; st.Text = "-"; st.Parent = sf
+      moduleRefs[#moduleRefs + 1] = function()
+        if not st.Parent then return end
+        st.Text = g.SB_SHOT
+          and ("Linksklick = " .. (tonumber(g.SB_SHOT_BURST) or 6) .. " Spells auf einmal.  Pool: "
+               .. table.concat(g.SB_SHOT_LIST or {}, ", ") .. "  | zuletzt: " .. tostring(g.SB_SHOT_SPELL or "-")
+               .. " (" .. (tonumber(g.SB_SHOT_COUNT) or 0) .. " Casts)")
+          or "feuert nur auf Klick: 6 Combat-Spells am Stueck aus den eigenen Bind-Sets, alphabetisch rotierend."
+      end
+      local rb = Instance.new("TextButton"); rb.Size = UDim2.new(1, -12, 0, 20); rb.LayoutOrder = 5
+      rb.BackgroundColor3 = Color3.fromRGB(34, 30, 50); rb.BorderSizePixel = 0
+      rb.Font = Enum.Font.Gotham; rb.TextSize = 12; rb.TextColor3 = Color3.fromRGB(215, 210, 235)
+      rb.Text = "zurueck auf A"; rb.Parent = sf; corner(rb, 4)
+      rb.MouseButton1Click:Connect(function() g.SB_SHOT_IDX = 1 end)
+    end)
+  addAction(troll, function() return "Snipe [M] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
+    function() task.spawn(doSnipe) end,
+    function(sf)
+      makeSliderW(sf, 1, "Tiefe", 5, 60, function() return tonumber(g.SB_SNIPE_DEPTH) or 15 end,
+        function(v) g.SB_SNIPE_DEPTH = math.floor(v + 0.5) end,
+        function(v) return math.floor(v + 0.5) .. " Studs" end)
+      makeSliderW(sf, 2, "Cast-Delay", 0, 0.3, function() return tonumber(g.SB_SNIPE_DELAY) or 0.05 end,
+        function(v) g.SB_SNIPE_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      makeToggleW(sf, 3, "Terrain-Blase", function() return g.SB_SNIPE_CARVE ~= false end,
+        function() g.SB_SNIPE_CARVE = not (g.SB_SNIPE_CARVE ~= false) end)
+      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 4
+      sn.BackgroundTransparency = 1; sn.Font = Enum.Font.Gotham; sn.TextSize = 11
+      sn.TextColor3 = Color3.fromRGB(150, 150, 170); sn.TextWrapped = true
+      sn.TextXAlignment = Enum.TextXAlignment.Left; sn.Parent = sf
+      moduleRefs[#moduleRefs + 1] = function()
+        if not sn.Parent then return end
+        sn.Text = "M: unter das Silent-Aim-Ziel TP, EIN Safe-Combat-Spell nach oben, sofort zurueck. "
+          .. "zuletzt: " .. tostring(g.SB_SNIPE_STATUS or "-") .. " (" .. (tonumber(g.SB_SNIPE_COUNT) or 0) .. ")"
+      end
+    end)
+
   -- === Utility-Panel ===
   local util = makePanel("Utility", 26 + PANEL_W + 10, 40)
   addAction(util, function() return "Apparate \xe2\x86\x92 " .. tostring(g.SB_APPA_TARGET or "-") end,
@@ -1768,6 +2114,7 @@ local function mountGui()
     { "Auto-Dodge",  function() return g.SB_DODGE end },
     { "Safe-Combat", function() return g.SB_SAFE end },
     { "Autofarm",    function() return g.SB_FARM end },
+    { "Shotgun",     function() return g.SB_SHOT end },
   }
   local function rebuildArray()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
@@ -1790,6 +2137,8 @@ local function mountGui()
     while gui.Parent do
       for _, p in ipairs(moduleRefs) do pcall(p) end
       pcall(rebuildArray)
+      -- Watchdog: Shotgun auch starten wenn der Toggle von aussen gesetzt wurde
+      if g.SB_SHOT and not g.SB_SHOT_LOOP then pcall(startShotgun) end
       task.wait(0.2)
     end
   end)
@@ -1819,6 +2168,8 @@ local function mountGui()
       g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
     elseif i.KeyCode == Enum.KeyCode.K then
       g.SB_FARM = not g.SB_FARM; if g.SB_FARM then startFarm() end
+    elseif i.KeyCode == Enum.KeyCode.M then
+      doSnipe()                                   -- 1 Ziel: runter, Spell, zurueck
     end
   end))
 
