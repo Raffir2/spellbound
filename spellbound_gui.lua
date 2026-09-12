@@ -1031,14 +1031,16 @@ local function parkMap()
   return n
 end
 
--- Terrain-Blase um pos ausschneiden, vorher sichern (damit der Restore sie zurueckholt).
-local function carveTerrain(pos, radius)
+-- Terrain-Zellbereich ausschneiden, vorher sichern (damit der Restore ihn zurueckholt).
+-- Radien in ZELLEN (1 Zelle = 4 Studs), pro Achse getrennt -> es geht auch ein duenner
+-- Schacht statt eines fetten Wuerfels. Rueckgabe ist der Key zum gezielten Zumachen.
+local function carveCells(pos, rx, ry, rz)
   local terr = workspace.Terrain
-  local r = math.max(1, math.floor(radius / 4))
+  rx, ry, rz = math.max(0, rx), math.max(0, ry), math.max(0, rz)
   local cx, cy, cz = math.floor(pos.X / 4), math.floor(pos.Y / 4), math.floor(pos.Z / 4)
-  local mn = Vector3int16.new(cx - r, cy - r, cz - r)
-  local mx = Vector3int16.new(cx + r, cy + r, cz + r)
-  local key = mn.X .. "," .. mn.Y .. "," .. mn.Z .. "/" .. r
+  local mn = Vector3int16.new(cx - rx, cy - ry, cz - rz)
+  local mx = Vector3int16.new(cx + rx, cy + ry, cz + rz)
+  local key = mn.X .. "," .. mn.Y .. "," .. mn.Z .. "/" .. rx .. "x" .. ry .. "x" .. rz
   if not g.SB_TERR_SNAP[key] then
     if (tonumber(g.SB_TERR_COUNT) or 0) >= TERR_SNAP_MAX then
       g.SB_TERR_TRUNC = true                       -- Deckel erreicht: ab hier ohne Sicherung
@@ -1055,23 +1057,29 @@ local function carveTerrain(pos, radius)
                                 Vector3.new((mx.X + 1) * 4, (mx.Y + 1) * 4, (mx.Z + 1) * 4)),
                     4, Enum.Material.Air)
   end)
+  return key
 end
 
--- Genau EINE Blase wieder zumachen (gleicher Key wie beim Schneiden) - fuer Aktionen, die
--- nur kurz ein Loch brauchen (Snipe): schneiden, schiessen, sofort wieder zu.
-local function uncarveTerrain(pos, radius)
-  local terr = workspace.Terrain
-  local r = math.max(1, math.floor(radius / 4))
-  local cx, cy, cz = math.floor(pos.X / 4), math.floor(pos.Y / 4), math.floor(pos.Z / 4)
-  local mn = Vector3int16.new(cx - r, cy - r, cz - r)
-  local key = mn.X .. "," .. mn.Y .. "," .. mn.Z .. "/" .. r
-  local snap = g.SB_TERR_SNAP[key]
-  if not snap or not snap.reg then return false end
-  local ok = pcall(function() terr:PasteRegion(snap.reg, snap.corner, true) end)
+-- Genau EINEN Bereich wieder zumachen (Key aus carveCells).
+local function uncarveCells(key)
+  local snap = key and g.SB_TERR_SNAP[key]
+  if not (snap and snap.reg) then return false end
+  local ok = pcall(function() workspace.Terrain:PasteRegion(snap.reg, snap.corner, true) end)
   pcall(function() snap.reg:Destroy() end)
   g.SB_TERR_SNAP[key] = nil
   g.SB_TERR_COUNT = math.max((tonumber(g.SB_TERR_COUNT) or 1) - 1, 0)
   return ok
+end
+
+-- Schuss-Schacht: der Standort liegt exakt UNTER dem Ziel, der Schuss geht also senkrecht
+-- nach oben - dafuer reicht eine schmale Saeule (3 Zellen = 12 Studs breit) von knapp unter
+-- dem Standort bis knapp ueber das Ziel. Vorher war es ein 11er-Wuerfel (44 Studs breit):
+-- der hat bei kurzer Distanz auch den Boden unter dem EIGENEN Standort mitgenommen, und man
+-- ist beim Zurueck-Teleport durch die Map gefallen. Jetzt ~95% weniger Terrain weg.
+local function carveShaft(fromPos, toPos)
+  local mid   = (fromPos + toPos) * 0.5
+  local halfY = math.abs(toPos.Y - fromPos.Y) * 0.5 + 3     -- 3 Studs Luft oben und unten
+  return carveCells(mid, 1, math.ceil(halfY / 4), 1)
 end
 
 -- Map + gesicherte Terrain-Blasen zurueckholen, ohne Rejoin.
@@ -1224,7 +1232,7 @@ local function startFarm()
             local spot  = root.Position - Vector3.new(0, depth, 0)
             if farmTeleport(spot) then
               if g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
-                carveTerrain((spot + root.Position) * 0.5, depth * 0.5 + 14)
+                carveShaft(spot, root.Position)         -- schmale Saeule statt Wuerfel
               end
               task.wait(tonumber(g.SB_FARM_DELAY) or 0.25)
               -- Ziel koennte inzwischen weg/tot/in einer Safe Zone sein -> frisch pruefen
@@ -1311,7 +1319,8 @@ local function doSnipe()
   startSelector()                                   -- haelt g.SB_REFS/Wand-Closures aktuell
   task.spawn(function()
     local home = hrp.CFrame
-    local carvedAt, carvedR                          -- gemerkt, damit das Loch wieder zugeht
+    local carveKey                                   -- gemerkt, damit das Loch wieder zugeht
+    local holdAnchor = false                         -- daheim verankert bleiben, bis es zu ist
     local ROT = g.SB_SAFE_ROT or {}
     local function nextSpell()                       -- naechster Slot der Safe-Combat-Rotation
       local idx = tonumber(g.SB_ROT_IDX) or 1
@@ -1352,8 +1361,7 @@ local function doSnipe()
       local spot = root.Position - Vector3.new(0, depth, 0)
       if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
       if g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
-        carvedAt, carvedR = (spot + root.Position) * 0.5, depth * 0.5 + 14
-        carveTerrain(carvedAt, carvedR)
+        carveKey = carveShaft(spot, root.Position)   -- schmale Saeule, 12 Studs breit
       end
       task.wait(tonumber(g.SB_SNIPE_DELAY) or 0.05)
       if killSpell and root.Parent and hum.Health > 0 then
@@ -1373,11 +1381,14 @@ local function doSnipe()
       if not (ch2 and hrp2) then return end
       pcall(function() ch2:PivotTo(home) end)
       hrp2.AssemblyLinearVelocity = Vector3.zero
-      hrp2.Anchored = false
+      hrp2.Anchored = holdAnchor                     -- erst frei, wenn der Schacht zu ist
       local hum2 = ch2:FindFirstChildOfClass("Humanoid")
       local cam  = workspace.CurrentCamera
       if cam and hum2 and cam.CameraSubject ~= hum2 then cam.CameraSubject = hum2 end
     end
+    -- Verankert heimkommen und ERST entankern, wenn der Schacht wieder zu ist - sonst
+    -- faellt man durch das eigene Loch, falls man nah am Ziel stand.
+    holdAnchor = (carveKey ~= nil)
     goHome()
     task.spawn(function()
       for _ = 1, 4 do                                -- Nachhalten gegen Physik-Rubberband
@@ -1386,15 +1397,26 @@ local function doSnipe()
         local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
         if hrp2 then
           if (hrp2.Position - home.Position).Magnitude > 3 then goHome() end
-          if hrp2.Anchored then hrp2.Anchored = false end
+          if hrp2.Anchored ~= holdAnchor then hrp2.Anchored = holdAnchor end
         end
       end
     end)
-    -- Terrain-Blase wieder zumachen, sobald der Spell durch ist (sonst bleibt das Loch offen)
-    if carvedAt then
+    -- Schacht sofort wieder zumachen, dann entankern. Das kurze Warten reicht, damit das
+    -- Projektil den Schacht verlassen hat (Tiefe/Speed sind ~0.05s).
+    if carveKey then
+      local key = carveKey
       task.spawn(function()
-        task.wait(0.45)
-        pcall(uncarveTerrain, carvedAt, carvedR)
+        task.wait(0.15)
+        pcall(uncarveCells, key)
+        holdAnchor = false
+        local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
+      end)
+      -- Notbremse: haengt der Verschluss, wird trotzdem entankert (nie festkleben)
+      task.delay(2, function()
+        holdAnchor = false
+        local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
       end)
     end
     g.SB_SNIPE_BUSY = false
