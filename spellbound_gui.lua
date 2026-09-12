@@ -7,6 +7,7 @@
 --       wechselt dabei (Torso/Kopf/Arme + Offset), damit es nicht nach Bot aussieht.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
+--   AUTO-SEAL: spielt das Bogen-Minigame vom Clash Seal (Boegen aus dem Server-Seed nachgerechnet).
 --   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
 --       Abstand) aus den eigenen Bind-Sets, alphabetisch rotierend.
 --   SNIPE (E): Tarnschuss aufs Silent-Aim-Ziel, punktgenau zum Einschlag TP unter das Ziel,
@@ -50,6 +51,7 @@ if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells 
 g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht "haengend"
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
+g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
 g.SB_NOFOG = false                         -- Nebel-Entferner: vorerst ausgebaut
 g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
 pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
@@ -949,6 +951,86 @@ local function startClashAuto()
   table.insert(g.SB_CONNS, clashConn)
 end
 
+--========================= Auto-Seal (Clash Seal) =========================--
+-- Der Clash Seal ist KEIN normaler Clash: kein Clashing-GUI, kein Client_IsClashing, eigenes
+-- Paket sealClashInput { sealId, arcIndex, clientAngle }. Die Boegen kommen aber aus demselben
+-- Generator wie beim Duell-Clash: shared.modules.ArcScribe, der ausser Random.new(seed)
+-- keinerlei Zustand hat (in-game geprueft: gleicher Seed -> identische Boegen). Der Server
+-- schickt per sealStateSync myArcSeed + myArcIndex -> der aktive Bogen laesst sich exakt
+-- nachrechnen und ohne GUI/Timing mitten hinein treffen. Ueberlappt der Bonus-Bogen, wird in
+-- den Bonus gezielt (computeHitResult gibt dann 2 Punkte statt 1).
+-- Elder Wand: ArcScribe.next(true) vergroessert nur die Boegen (x1.4), wie im Clash-Client.
+g.SB_SEAL_DELAY = tonumber(g.SB_SEAL_DELAY) or 0.35   -- menschliche Reaktionszeit pro Bogen
+
+local function startSealAuto()
+  if g.SB_SEAL_HOOKED then return end
+  local okA, ArcScribe = pcall(function() return require(RS.shared.modules.ArcScribe) end)
+  local okG, geo       = pcall(function() return require(RS.shared.modules.clashGeometry) end)
+  if not (okA and ArcScribe and okG and geo and okPk and packets
+          and packets.sealStateSync and packets.sealClashInput) then
+    g.SB_SEAL_STATUS = "Seal-Module fehlen"; return
+  end
+  g.SB_SEAL_HOOKED = true
+  g.SB_SEAL_HITS = tonumber(g.SB_SEAL_HITS) or 0
+  local st = { seed = nil, elder = nil, gen = nil, genIdx = -1, arc = nil,
+               sentIdx = -1, sentAt = 0, busy = false }
+
+  -- Bogen fuer arcIndex (0-basiert wie moveClash: erster Bogen = 0) aus dem Seed ziehen.
+  -- Generator wird inkrementell weitergedreht; bei neuem Seed/Elder/Ruecksprung neu aufgebaut.
+  local function arcFor(seed, idx, elder)
+    if st.seed ~= seed or st.elder ~= elder or idx < st.genIdx then
+      st.seed, st.elder, st.gen, st.genIdx, st.arc = seed, elder, ArcScribe.new(seed), -1, nil
+    end
+    while st.genIdx < idx do
+      st.arc = st.gen:next(elder)
+      st.genIdx = st.genIdx + 1
+    end
+    return st.arc
+  end
+
+  local function holdsElder()
+    local ch = lp.Character
+    local t = ch and ch:FindFirstChildWhichIsA("Tool")
+    return t ~= nil and t.Name == "Elder Wand"
+  end
+
+  packets.sealStateSync.listen(function(d)
+    if not g.SB_SEAL then return end
+    if not (d and d.hasActiveSeal and d.sealId and d.myArcSeed ~= nil and d.myArcIndex ~= nil) then
+      g.SB_SEAL_STATUS = d and d.hasActiveSeal and ("wartet (" .. tostring(d.myRangeState) .. ")") or "kein Seal"
+      return
+    end
+    local idx = tonumber(d.myArcIndex) or 0
+    -- pro Bogen genau ein Schuss; kommt der Index nicht weiter, nach 1.5s neu versuchen
+    if idx == st.sentIdx and os.clock() - st.sentAt < 1.5 then return end
+    if st.busy then return end
+    st.busy = true
+    local seed, sealId, elder = d.myArcSeed, d.sealId, holdsElder()
+    task.spawn(function()
+      pcall(function()
+        task.wait(math.max(tonumber(g.SB_SEAL_DELAY) or 0.35, 0))
+        if not g.SB_SEAL or legitFail() then return end   -- Legitness: Bogen absichtlich verpassen
+        local a = arcFor(seed, idx, elder)
+        if not a then return end
+        -- Ziel: Bonus-Mitte bei Ueberlappung (2 Punkte), sonst Mitte des Hauptbogens
+        local bStart, bSize, overlap = geo.getEffectiveBonusArc(a.arcStart, a.arcSize,
+          a.bonusArcStart, a.bonusArcSize, ArcScribe.BONUS_ARC_OVERLAP_SIZE)
+        local angle = a.arcStart + a.arcSize * 0.5
+        if overlap then
+          local mid = bStart + bSize * 0.5
+          if geo.isAngleInArc(mid, a.arcStart, a.arcSize) then angle = mid end
+        end
+        angle = geo.normalizeAngle(angle)
+        packets.sealClashInput.send({ sealId = sealId, arcIndex = idx, clientAngle = angle })
+        st.sentIdx, st.sentAt = idx, os.clock()
+        g.SB_SEAL_HITS = (tonumber(g.SB_SEAL_HITS) or 0) + 1
+        g.SB_SEAL_STATUS = string.format("Bogen #%d -> %.0f Grad%s", idx, angle, overlap and " (Bonus)" or "")
+      end)
+      st.busy = false
+    end)
+  end)
+end
+
 --========================= Apparate-to-Player (echter appa-Cast) =========================--
 -- Castet den ECHTEN Apparition-Spell "appa" auf die Ziel-Position (mit Animation/Effekt),
 -- via loadSpellReplication(spell="appa") + uniqueSpellReplication(target=Zielpos).
@@ -1747,7 +1829,7 @@ local CFG_KEYS = {
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
   "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
-  "SB_KD_PAUSE", "SB_KD_LIMIT",
+  "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
@@ -1755,7 +1837,7 @@ local CFG_KEYS = {
 }
 local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
-local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_DODGE", "SB_SAFE",
+local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
 local CFG_HOTMODS = { "SB_FARM", "SB_KD", "SB_SHOT" }   -- greifen von selbst ins Spiel ein
 -- Streamproof bleibt bewusst draussen: gespeichert "an" waere die GUI nach dem Laden
@@ -1818,6 +1900,7 @@ local function cfgApplyModules(mods)
     g.SB_AIM = on("SB_AIM");       if g.SB_AIM then startSelector(); startAim() end
     g.SB_SHIELD = on("SB_SHIELD"); if g.SB_SHIELD then hookShield() end
     g.SB_CLASH = on("SB_CLASH");   if g.SB_CLASH then startClashAuto() end
+    g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     g.SB_SAFE = on("SB_SAFE");     if g.SB_SAFE then startSelector() end
     g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = on("SB_TEAM_ESP"), on("SB_ESP_NAMES"), on("SB_CHAMS")
@@ -2491,6 +2574,15 @@ local function mountGui()
   addModule(combat, "Auto-Clash",
     function() return g.SB_CLASH end,
     function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
+  addModule(combat, "Auto-Seal",
+    function() return g.SB_SEAL end,
+    function(v) g.SB_SEAL = v; if v then startSealAuto() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
+        function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      addInfo(sf, 2, "Spielt das Bogen-Minigame vom Clash Seal: rechnet den aktiven Bogen aus dem Seed des Servers nach und trifft die Mitte (bei Ueberlappung den Bonus). Der normale Auto-Clash greift hier nicht - eigenes Paket, eigene GUI.", 76)
+    end)
   addModule(combat, "Auto-Dodge",
     function() return g.SB_DODGE end,
     function(v) g.SB_DODGE = v; if v then g.SB_DODGE_SKIPACC = 0; hookDodge() end end,
@@ -2727,6 +2819,7 @@ local function mountGui()
     { "Silent-Aim",  function() return g.SB_AIM end },
     { "Auto-Shield", function() return g.SB_SHIELD end },
     { "Auto-Clash",  function() return g.SB_CLASH end },
+    { "Auto-Seal",   function() return g.SB_SEAL end },
     { "Auto-Dodge",  function() return g.SB_DODGE end },
     { "Safe-Combat", function() return g.SB_SAFE end },
     { "Autofarm",    function() return g.SB_FARM end },
