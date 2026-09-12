@@ -4,7 +4,7 @@
 --   COMBO: nach JEDEM Auto-Spell-Fire wird einmal der gewaehlte Combo-Spell equippt
 --       + gecastet, danach sofort wieder der Auto-Spell scharf. Toggle + auswaehlbar.
 --   SILENT-AIM: lenkt jeden Klick auf den Gegner am naechsten zum Cursor. Die Trefferzone
---       wechselt dabei (Torso/Kopf/Gliedmassen + Offset), damit es nicht nach Bot aussieht.
+--       wechselt dabei (Torso/Kopf/Arme + Offset), damit es nicht nach Bot aussieht.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
 --   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
@@ -513,16 +513,16 @@ end
 --========================= Trefferzone (nicht immer der Torso) =========================--
 -- Silent-Aim zielte bisher immer auf HumanoidRootPart, also exakt Brustmitte - das sieht in
 -- Aufnahmen sofort nach Bot aus. Jetzt wird pro Ziel eine Koerperzone gewichtet gewuerfelt
--- (Torso oft, Kopf/Gliedmassen seltener), dazu ein Zufalls-Offset innerhalb des Teils, und
+-- (Torso oft, Kopf/Arme seltener; keine Beine - zu schmal), dazu ein Offset im Teil, und
 -- die Wahl bleibt SB_AIM_ZONEROLL Sekunden stehen (sonst zappelt der Zielpunkt pro Frame).
 -- Funktioniert fuer R15 und R6: es werden nur real vorhandene Teile gezogen.
 if g.SB_AIM_ZONES == nil then g.SB_AIM_ZONES = true end
 g.SB_AIM_ZONEROLL = tonumber(g.SB_AIM_ZONEROLL) or 1.2
 g.SB_AIM_ZONE = {}                                  -- [Charaktername] = { part, off, expires }
+-- Nur Torso, Kopf und Arme - Beine/Fuesse sind zu schmal und kosten Treffer.
 local AIM_ZONES = {
-  { "HumanoidRootPart", 24 }, { "UpperTorso", 20 }, { "Torso", 20 }, { "LowerTorso", 14 },
-  { "Head", 12 }, { "LeftUpperArm", 5 }, { "RightUpperArm", 5 }, { "Left Arm", 5 }, { "Right Arm", 5 },
-  { "LeftUpperLeg", 4 }, { "RightUpperLeg", 4 }, { "Left Leg", 4 }, { "Right Leg", 4 },
+  { "HumanoidRootPart", 26 }, { "UpperTorso", 22 }, { "Torso", 22 }, { "LowerTorso", 14 },
+  { "Head", 14 }, { "LeftUpperArm", 6 }, { "RightUpperArm", 6 }, { "Left Arm", 6 }, { "Right Arm", 6 },
 }
 local zoneRng = Random.new()
 local function aimZone(char, root)
@@ -1644,6 +1644,188 @@ local function startKD()
   end)
 end
 
+--========================= Config: speichern + automatisch laden =========================--
+-- getgenv() ist nach einem Rejoin leer, deshalb liegen die Einstellungen als JSON im
+-- Executor-Workspace (mehrere Slots unter spellbound_configs/). Beim Start wird der zuletzt
+-- benutzte Slot geladen, danach speichert eine Schleife alle 2s - aber nur, wenn sich
+-- wirklich etwas geaendert hat (JSON-Vergleich), damit nicht dauernd geschrieben wird.
+-- Gespeichert werden NUR Einstellungen, kein Laufzeit-Zustand (Loops, Refs, Zaehler).
+local CFG_DIR  = "spellbound_configs"
+local CFG_LAST = CFG_DIR .. "/_last.txt"
+if g.SB_CFG_AUTOSAVE == nil then g.SB_CFG_AUTOSAVE = true end
+if g.SB_CFG_AUTOLOAD == nil then g.SB_CFG_AUTOLOAD = true end
+if g.SB_CFG_MODULES  == nil then g.SB_CFG_MODULES  = true end   -- Modulzustaende mitladen
+if g.SB_CFG_HOT      == nil then g.SB_CFG_HOT      = false end  -- auch Farm/KD/Shotgun starten
+g.SB_CFG_NAME = g.SB_CFG_NAME or "default"
+
+local CFG_KEYS = {
+  "SB_AIM_FOV", "SB_AIM_RANGE", "SB_AIM_PRED", "SB_AIM_NPC", "SB_AIM_PROJSPEED",
+  "SB_AIM_SKIP_STAFF", "SB_AIM_ZONES", "SB_AIM_ZONEROLL",
+  "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
+  "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
+  "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
+  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT",
+  "SB_KD_PAUSE", "SB_KD_LIMIT",
+  "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
+  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
+  "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
+  "SB_CFG_AUTOSAVE", "SB_CFG_AUTOLOAD", "SB_CFG_MODULES", "SB_CFG_HOT",
+}
+local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP" }
+local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
+local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_DODGE", "SB_SAFE",
+                      "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
+local CFG_HOTMODS = { "SB_FARM", "SB_KD", "SB_SHOT" }   -- greifen von selbst ins Spiel ein
+-- Streamproof bleibt bewusst draussen: gespeichert "an" waere die GUI nach dem Laden
+-- unsichtbar, ohne dass man weiss warum.
+
+local function cfgSanitize(name)
+  name = tostring(name or "default"):gsub("[^%w_%- ]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if name == "" then name = "default" end
+  return name
+end
+local function cfgPath(name) return CFG_DIR .. "/" .. cfgSanitize(name) .. ".json" end
+local function cfgEnsureDir()
+  pcall(function()
+    if isfolder and not isfolder(CFG_DIR) then makefolder(CFG_DIR) end
+  end)
+end
+local function cfgCollect()
+  local d = { keys = {}, tables = {}, modules = {} }
+  for _, k in ipairs(CFG_KEYS) do
+    local v = g[k]
+    if type(v) == "number" or type(v) == "string" or type(v) == "boolean" then d.keys[k] = v end
+  end
+  for _, k in ipairs(CFG_TABLES) do if type(g[k]) == "table" then d.tables[k] = g[k] end end
+  for _, k in ipairs(CFG_NUMKEY) do
+    if type(g[k]) == "table" then
+      local t = {}
+      for id, val in pairs(g[k]) do t[tostring(id)] = val end
+      d.tables[k] = t
+    end
+  end
+  for _, k in ipairs(CFG_MODULES) do d.modules[k] = g[k] and true or false end
+  for _, k in ipairs(CFG_HOTMODS) do d.modules[k] = g[k] and true or false end
+  return d
+end
+local function cfgApplySettings(d)
+  if type(d) ~= "table" then return false end
+  for k, v in pairs(d.keys or {}) do g[k] = v end
+  local numkey = {}
+  for _, k in ipairs(CFG_NUMKEY) do numkey[k] = true end
+  for k, v in pairs(d.tables or {}) do
+    if type(v) == "table" then
+      if numkey[k] then
+        local t = {}
+        for id, val in pairs(v) do t[tonumber(id) or id] = val end
+        g[k] = t
+      else
+        g[k] = v
+      end
+    end
+  end
+  if type(g.SB_SAFE_ROT) ~= "table" or #g.SB_SAFE_ROT ~= 4 then g.SB_SAFE_ROT = DEFAULT_ROT end
+  return true
+end
+-- Modulzustaende wiederherstellen; die Starter muessen mitlaufen, sonst steht der Toggle
+-- auf "an", ohne dass die Schleife dahinter existiert.
+local function cfgApplyModules(mods)
+  if type(mods) ~= "table" then return end
+  local function on(k) return mods[k] == true end
+  if g.SB_CFG_MODULES then
+    g.SB_AIM = on("SB_AIM");       if g.SB_AIM then startSelector(); startAim() end
+    g.SB_SHIELD = on("SB_SHIELD"); if g.SB_SHIELD then hookShield() end
+    g.SB_CLASH = on("SB_CLASH");   if g.SB_CLASH then startClashAuto() end
+    g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
+    g.SB_SAFE = on("SB_SAFE");     if g.SB_SAFE then startSelector() end
+    g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = on("SB_TEAM_ESP"), on("SB_ESP_NAMES"), on("SB_CHAMS")
+    if g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS or g.SB_STAFF_ESP then startVisuals() end
+  end
+  if g.SB_CFG_HOT then                      -- nur auf ausdruecklichen Wunsch
+    g.SB_FARM = on("SB_FARM"); if g.SB_FARM then startFarm() end
+    g.SB_KD   = on("SB_KD");   if g.SB_KD   then g.SB_KD_COUNT = 0; startKD() end
+    g.SB_SHOT = on("SB_SHOT"); if g.SB_SHOT then startShotgun() end
+  end
+end
+
+local function cfgSave(name)
+  cfgEnsureDir()
+  local ok, js = pcall(function() return Http:JSONEncode(cfgCollect()) end)
+  if not ok then return false end
+  local okW = pcall(function() writefile(cfgPath(name), js) end)
+  if okW then
+    pcall(function() writefile(CFG_LAST, cfgSanitize(name)) end)
+    g.SB_CFG_SAVED, g.SB_CFG_JSON = os.date("%H:%M:%S"), js
+  end
+  return okW
+end
+local function cfgRead(name)
+  local ok, data = pcall(function()
+    local p = cfgPath(name)
+    if isfile and isfile(p) then return Http:JSONDecode(readfile(p)) end
+    return nil
+  end)
+  return ok and data or nil
+end
+local function cfgLoad(name, withModules)
+  local d = cfgRead(name)
+  if not d then return false end
+  cfgApplySettings(d)
+  if withModules then cfgApplyModules(d.modules) end
+  g.SB_CFG_NAME = cfgSanitize(name)
+  pcall(function() writefile(CFG_LAST, g.SB_CFG_NAME) end)
+  g.SB_CFG_LOADED = g.SB_CFG_NAME
+  return true
+end
+local function cfgDelete(name)
+  local okD = pcall(function() delfile(cfgPath(name)) end)
+  return okD
+end
+local function cfgList()
+  local out = {}
+  pcall(function()
+    if not (listfiles and isfolder and isfolder(CFG_DIR)) then return end
+    for _, f in ipairs(listfiles(CFG_DIR)) do
+      local n = tostring(f):match("([^/\\]+)%.json$")
+      if n then out[#out + 1] = n end
+    end
+  end)
+  table.sort(out)
+  if #out == 0 then out[1] = "default" end
+  return out
+end
+
+-- Beim Start: zuletzt benutzten Slot laden (Einstellungen immer, Module je nach Option).
+local function cfgAutoLoad()
+  if not g.SB_CFG_AUTOLOAD then return false end
+  local name
+  pcall(function() if isfile and isfile(CFG_LAST) then name = readfile(CFG_LAST) end end)
+  name = cfgSanitize(name or g.SB_CFG_NAME)
+  if not cfgRead(name) then return false end
+  return cfgLoad(name, true)
+end
+-- Autosave: alle 2s pruefen, nur bei echter Aenderung schreiben. Die Generation sorgt
+-- dafuer, dass eine alte Schleife nach einem Re-Execute aussteigt.
+local function cfgAutoSaveLoop()
+  g.SB_CFG_GEN = (tonumber(g.SB_CFG_GEN) or 0) + 1
+  local myGen = g.SB_CFG_GEN
+  task.spawn(function()
+    while myGen == g.SB_CFG_GEN do
+      task.wait(2)
+      if g.SB_CFG_AUTOSAVE and myGen == g.SB_CFG_GEN then
+        local ok, js = pcall(function() return Http:JSONEncode(cfgCollect()) end)
+        if ok and js ~= g.SB_CFG_JSON then
+          cfgEnsureDir()
+          if pcall(function() writefile(cfgPath(g.SB_CFG_NAME), js) end) then
+            g.SB_CFG_JSON, g.SB_CFG_SAVED = js, os.date("%H:%M:%S")
+            pcall(function() writefile(CFG_LAST, cfgSanitize(g.SB_CFG_NAME)) end)
+          end
+        end
+      end
+    end
+  end)
+end
+
 --========================= Spell-Liste (fuer Dropdowns) =========================--
 local function getSpellList()
   local okS, spells = pcall(function() return require(RS.shared.modules.spells) end)
@@ -1890,6 +2072,47 @@ local function mountGui()
       if not btn.Parent then return false end
       btn.Text = "  " .. labelFn()
     end
+  end
+
+  -- Knopf (fuehrt eine Aktion aus, kein Zustand)
+  local function makeButtonW(parent, ord, label, onClick)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -10, 0, 20); b.LayoutOrder = ord; b.AutoButtonColor = false
+    b.BackgroundColor3 = WIDGET; b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamBold; b.TextSize = 11; b.TextColor3 = TXT
+    b.Text = label; b.Parent = parent; corner(b, 2)
+    b.MouseEnter:Connect(function() b.BackgroundColor3 = WIDGET_H end)
+    b.MouseLeave:Connect(function() b.BackgroundColor3 = WIDGET end)
+    b.MouseButton1Click:Connect(function()
+      onClick()
+      b.BackgroundColor3 = ACCENT; b.TextColor3 = DARKTXT
+      task.delay(0.15, function()
+        if b.Parent then b.BackgroundColor3 = WIDGET_H; b.TextColor3 = TXT end
+      end)
+    end)
+    return b
+  end
+
+  -- Textfeld (z.B. Config-Name)
+  local function makeTextW(parent, ord, label, get, set)
+    local holder = Instance.new("Frame"); holder.Size = UDim2.new(1, -10, 0, 20)
+    holder.LayoutOrder = ord; holder.BackgroundColor3 = WIDGET; holder.BorderSizePixel = 0
+    holder.Parent = parent; corner(holder, 2)
+    local l = Instance.new("TextLabel"); l.Size = UDim2.new(0, 42, 1, 0)
+    l.Position = UDim2.fromOffset(6, 0); l.BackgroundTransparency = 1
+    l.Font = Enum.Font.Gotham; l.TextSize = 11; l.TextColor3 = TXT_DIM
+    l.TextXAlignment = Enum.TextXAlignment.Left; l.Text = label; l.Parent = holder
+    local tb = Instance.new("TextBox"); tb.Size = UDim2.new(1, -54, 1, -4)
+    tb.Position = UDim2.fromOffset(48, 2); tb.BackgroundColor3 = Color3.fromRGB(12, 13, 16)
+    tb.BorderSizePixel = 0; tb.Font = Enum.Font.Gotham; tb.TextSize = 11
+    tb.TextColor3 = ACCENT; tb.TextXAlignment = Enum.TextXAlignment.Left
+    tb.ClearTextOnFocus = false; tb.Text = get(); tb.Parent = holder; corner(tb, 2)
+    tb.FocusLost:Connect(function() set(tb.Text); tb.Text = get() end)
+    moduleRefs[#moduleRefs + 1] = function()
+      if not tb.Parent then return false end
+      if not tb:IsFocused() then tb.Text = get() end
+    end
+    return tb
   end
 
   -- Ueberschrift innerhalb eines Einstellungs-Blocks
@@ -2446,6 +2669,28 @@ local function mountGui()
   lgh.TextXAlignment = Enum.TextXAlignment.Left
   lgh.Text = "0% = voller Cheat. Bei X% failt jede Aktion (Aim/Dodge/Shield/Clash/Cast) mit X% Wahrscheinlichkeit."
   lgh.Parent = cfg.body
+  addAction(cfg, function()
+      return "Config: " .. tostring(g.SB_CFG_NAME) .. (g.SB_CFG_SAVED and ("  " .. g.SB_CFG_SAVED) or "")
+    end,
+    function() cfgSave(g.SB_CFG_NAME) end,
+    function(sf)
+      makeTextW(sf, 1, "Name", function() return tostring(g.SB_CFG_NAME) end,
+        function(v) g.SB_CFG_NAME = v end)
+      makeDropdownW(sf, 2, function() return "Slot: " .. tostring(g.SB_CFG_NAME) end,
+        cfgList, function(n) g.SB_CFG_NAME = n end)
+      makeButtonW(sf, 3, "Speichern", function() cfgSave(g.SB_CFG_NAME) end)
+      makeButtonW(sf, 4, "Laden", function() cfgLoad(g.SB_CFG_NAME, true) end)
+      makeButtonW(sf, 5, "Loeschen", function() cfgDelete(g.SB_CFG_NAME) end)
+      makeToggleW(sf, 6, "Auto-Save", function() return g.SB_CFG_AUTOSAVE == true end,
+        function() g.SB_CFG_AUTOSAVE = not g.SB_CFG_AUTOSAVE end)
+      makeToggleW(sf, 7, "Auto-Load beim Start", function() return g.SB_CFG_AUTOLOAD == true end,
+        function() g.SB_CFG_AUTOLOAD = not g.SB_CFG_AUTOLOAD end)
+      makeToggleW(sf, 8, "Module mitladen", function() return g.SB_CFG_MODULES == true end,
+        function() g.SB_CFG_MODULES = not g.SB_CFG_MODULES end)
+      makeToggleW(sf, 9, "Auch Farm/KD/Shotgun starten", function() return g.SB_CFG_HOT == true end,
+        function() g.SB_CFG_HOT = not g.SB_CFG_HOT end)
+      addInfo(sf, 10, "Slots liegen als JSON im Executor-Ordner spellbound_configs und ueberleben den Rejoin. Auto-Save schreibt alle 2s, aber nur bei Aenderungen. Farm/KD/Shotgun starten beim Laden nur, wenn die letzte Option an ist.", 76)
+    end)
   addModule(cfg, "Streamproof [Bild-Ab]",
     function() return g.SB_STREAMPROOF == true end,
     function(v) setStreamproof(v) end)
@@ -2587,4 +2832,8 @@ local function mountGui()
 end
 
 mountGui()
-return "Spellbound GUI geladen"
+-- Reihenfolge wichtig: erst die GUI (sie raeumt alte Overlays weg), dann die Config
+-- anwenden - sonst zerstoert mountGui gerade wieder eingeschaltete Visuals.
+local cfgOk = cfgAutoLoad()
+cfgAutoSaveLoop()
+return "Spellbound GUI geladen" .. (cfgOk and (" (Config: " .. tostring(g.SB_CFG_NAME) .. ")") or "")
