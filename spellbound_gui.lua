@@ -12,6 +12,7 @@
 --       zweiter Spell von unten, sofort zurueck auf den Startpunkt.
 --   AUTOFARM (K): loescht die Map lokal, teleportiert unter jeden Spieler und feuert dort
 --       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
+--   KD-FARM (J): killt dich per resetEvent im Dauertakt (~3.3s pro Tod) und haelt so die K/D unten.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
 --   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H-Hotkeys entfernt;
 --   P=Clash, C=Dodge, T=Apparate, G=Appa-laden bleiben als Aktions-Hotkeys.
@@ -46,6 +47,7 @@ if g.SB_SHOT_REEQUIP == nil then g.SB_SHOT_REEQUIP = true end  -- Stab vor jedem
 if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells mitnehmen
 g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht "haengend"
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
+g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
 pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
   local h = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
@@ -1547,6 +1549,60 @@ local function startShotgun()
   end)
 end
 
+--========================= KD-Farm (Auto-Reset) =========================--
+-- Toetet dich per shared.bridges.resetEvent (genau der Pfad, den der Reset-Knopf des
+-- Spiels benutzt) und wartet auf den Respawn, endlos oder bis zu einer Zielzahl.
+-- In-game gemessen: Tod nach 0.15s, neuer Character nach 3.2s -> ~3.3s pro Tod (~18/min).
+-- Der Respawn-Takt kommt vom Server (CharacterAutoLoads=false, RespawnTime=3), schneller
+-- geht es clientseitig nicht. Geprueft: der Reset zaehlt wirklich als Death (47 -> 48).
+if g.SB_KD_PAUSE == nil then g.SB_KD_PAUSE = 0.3 end   -- Extra-Pause nach dem Respawn
+g.SB_KD_LIMIT = tonumber(g.SB_KD_LIMIT) or 0           -- 0 = endlos, sonst Stopp nach n Toden
+g.SB_KD_COUNT = tonumber(g.SB_KD_COUNT) or 0
+
+-- Eigene oeffentliche Stats (Kills/Deaths) live aus der Registry des Spiels.
+local function kdStats()
+  local ok, ppd = pcall(function() return require(RS.shared.modules.publicPlayerData) end)
+  if not ok or type(ppd) ~= "table" or type(ppd.registry) ~= "table" then return nil end
+  local e = ppd.registry[lp.Name]
+  if type(e) ~= "table" then return nil end
+  return tonumber(e.Kills) or 0, tonumber(e.Deaths) or 0
+end
+local function kdLabel()
+  local k, d = kdStats()
+  if not k then return "K/D: -" end
+  return string.format("K/D: %d/%d (%.2f)", k, d, (d > 0) and (k / d) or k)
+end
+
+local function startKD()
+  if g.SB_KD_LOOP then return end
+  local bridges = RS:FindFirstChild("shared") and RS.shared:FindFirstChild("bridges")
+  local reset   = bridges and bridges:FindFirstChild("resetEvent")
+  if not reset then g.SB_KD, g.SB_KD_LOOP = false, false; return end
+  g.SB_KD_LOOP = true
+  task.spawn(function()
+    while g.SB_KD do
+      local ch  = lp.Character
+      local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+      if ch and ch.Parent and hum and hum.Health > 0 then
+        pcall(function() reset:FireServer() end)
+        g.SB_KD_COUNT = (tonumber(g.SB_KD_COUNT) or 0) + 1
+        -- auf den Character-Wechsel warten (Tod), dann auf den fertigen Respawn
+        local t0 = os.clock()
+        while g.SB_KD and lp.Character == ch and os.clock() - t0 < 8 do task.wait(0.1) end
+        local t1 = os.clock()
+        while g.SB_KD and not (lp.Character and lp.Character:FindFirstChild("HumanoidRootPart"))
+              and os.clock() - t1 < 15 do task.wait(0.1) end
+        task.wait(math.max(tonumber(g.SB_KD_PAUSE) or 0.3, 0.1))
+        local lim = tonumber(g.SB_KD_LIMIT) or 0
+        if lim > 0 and (tonumber(g.SB_KD_COUNT) or 0) >= lim then g.SB_KD = false end
+      else
+        task.wait(0.2)                              -- tot / noch kein Character: warten
+      end
+    end
+    g.SB_KD_LOOP = false
+  end)
+end
+
 --========================= Spell-Liste (fuer Dropdowns) =========================--
 local function getSpellList()
   local okS, spells = pcall(function() return require(RS.shared.modules.spells) end)
@@ -2066,6 +2122,25 @@ local function mountGui()
   addModule(util, "Chams (sichtbar)",
     function() return g.SB_CHAMS end,
     function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
+  addModule(util, "KD-Farm [J]",
+    function() return g.SB_KD end,
+    function(v) g.SB_KD = v; if v then g.SB_KD_COUNT = 0; startKD() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Pause nach Respawn", 0.1, 10, function() return tonumber(g.SB_KD_PAUSE) or 0.3 end,
+        function(v) g.SB_KD_PAUSE = math.floor(v * 10 + 0.5) / 10 end, function(v) return string.format("%.1fs", v) end)
+      makeSliderW(sf, 2, "Stopp nach n Toden", 0, 200, function() return tonumber(g.SB_KD_LIMIT) or 0 end,
+        function(v) g.SB_KD_LIMIT = math.floor(v + 0.5) end,
+        function(v) local n = math.floor(v + 0.5); return (n == 0) and "endlos" or tostring(n) end)
+      local ki = Instance.new("TextLabel"); ki.Size = UDim2.new(1, -12, 0, 54); ki.LayoutOrder = 3
+      ki.BackgroundTransparency = 1; ki.Font = Enum.Font.Gotham; ki.TextSize = 11
+      ki.TextColor3 = Color3.fromRGB(150, 150, 170); ki.TextWrapped = true
+      ki.TextXAlignment = Enum.TextXAlignment.Left
+      ki.Text = "Nutzt den Reset-Pfad des Spiels (resetEvent). Tod nach ~0.15s, Respawn nach ~3s -> ca. 18 Tode/Minute; schneller laesst der Server nicht zu."
+      ki.Parent = sf
+    end)
+  -- Live-Anzeige der eigenen oeffentlichen Stats (aktualisiert sich im Refresh-Loop)
+  addAction(util, function() return kdLabel() end, function() end)
+
   -- Freunde: von Silent-Aim UND Autofarm ausgenommen, per UserId in einer Datei gemerkt
   addAction(util, function() return "Freunde (" .. friendCount() .. ")" end,
     function() end,
@@ -2193,6 +2268,7 @@ local function mountGui()
     { "Safe-Combat", function() return g.SB_SAFE end },
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
+    { "KD-Farm",     function() return g.SB_KD end },
   }
   local function rebuildArray()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
@@ -2248,6 +2324,8 @@ local function mountGui()
       g.SB_FARM = not g.SB_FARM; if g.SB_FARM then startFarm() end
     elseif i.KeyCode == Enum.KeyCode.M then
       doSnipe()                                   -- 1 Ziel: runter, Spell, zurueck
+    elseif i.KeyCode == Enum.KeyCode.J then
+      g.SB_KD = not g.SB_KD; if g.SB_KD then g.SB_KD_COUNT = 0; startKD() end
     end
   end))
 
