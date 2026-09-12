@@ -50,6 +50,7 @@ if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells 
 g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht "haengend"
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
+g.SB_NOFOG = false                         -- Nebel-Entferner: vorerst ausgebaut
 g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
 pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
   local h = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
@@ -985,6 +986,58 @@ local function apparateTo(name)
   return true
 end
 
+--========================= Wand sicherstellen / Charakter reset =========================--
+-- Ohne Tool in der Hand gibt es keine WandClient-Closures -> der Autofarm haette nur
+-- gewartet ("keine Wand in der Hand"). Nach jedem Respawn liegt die Wand im Backpack, also
+-- erst von dort anlegen; ist gar keine da (oder der Charakter kaputt/tot), holt ein Reset
+-- ueber shared.bridges.resetEvent einen frischen Charakter samt Wand.
+local resetBridge = RS:FindFirstChild("shared") and RS.shared:FindFirstChild("bridges")
+                    and RS.shared.bridges:FindFirstChild("resetEvent")
+
+local function waitForCharacter(old, budget)
+  local t0 = os.clock()
+  while lp.Character == old and os.clock() - t0 < (budget or 8) do task.wait(0.1) end
+  local t1 = os.clock()
+  while not (lp.Character and lp.Character:FindFirstChild("HumanoidRootPart"))
+        and os.clock() - t1 < 12 do task.wait(0.1) end
+  task.wait(0.3)
+  return lp.Character
+end
+
+-- Reset mit Sperre, damit ein Dauerfehler nicht in eine Reset-Schleife laeuft.
+local function resetCharacter()
+  if not resetBridge then return false end
+  if os.clock() < (tonumber(g.SB_RESET_LOCK) or 0) then return false end
+  g.SB_RESET_LOCK = os.clock() + 8
+  local old = lp.Character
+  pcall(function() resetBridge:FireServer() end)
+  g.SB_RESETS = (tonumber(g.SB_RESETS) or 0) + 1
+  waitForCharacter(old, 8)
+  return true
+end
+
+local function equipFromBackpack()
+  local ch  = lp.Character
+  local hum = ch and ch:FindFirstChildOfClass("Humanoid")
+  if not (ch and hum and hum.Health > 0) then return false end
+  if ch:FindFirstChildWhichIsA("Tool") then return true end
+  local bp   = lp:FindFirstChildOfClass("Backpack")
+  local tool = bp and bp:FindFirstChildWhichIsA("Tool")
+  if not tool then return false end
+  pcall(function() hum:EquipTool(tool) end)
+  task.wait(0.2)
+  local ch2 = lp.Character
+  return (ch2 and ch2:FindFirstChildWhichIsA("Tool")) ~= nil
+end
+
+-- true = Wand ist in der Hand. allowReset erlaubt als letzten Ausweg den Charakter-Reset.
+local function ensureWand(allowReset)
+  if equipFromBackpack() then return true end
+  if not allowReset then return false end
+  if not resetCharacter() then return false end
+  return equipFromBackpack()
+end
+
 --========================= Autofarm (Map weg + Untergrund-Hopping) =========================--
 -- Ablauf pro Runde: Map lokal wegraeumen -> unter den naechsten Spieler teleportieren ->
 -- dort EINEN Spell mit Silent-Aim nach oben feuern -> naechster Spieler.
@@ -1010,6 +1063,7 @@ if g.SB_FARM_SKIP_SAFE    == nil then g.SB_FARM_SKIP_SAFE = true end     -- Safe
 if g.SB_FARM_SKIP_STAFF   == nil then g.SB_FARM_SKIP_STAFF = true end    -- Moderatoren auslassen
 if g.SB_FARM_RETURN       == nil then g.SB_FARM_RETURN = true end        -- am Ende zurueck
 if g.SB_FARM_REPEAT       == nil then g.SB_FARM_REPEAT = true end        -- endlos rotieren
+if g.SB_FARM_FIXWAND      == nil then g.SB_FARM_FIXWAND = true end       -- ohne Wand: Reset
 g.SB_MAP_PARKED = g.SB_MAP_PARKED or {}   -- ausgehaengte Map-Teile: { {inst=, parent=} }
 g.SB_TERR_SNAP  = g.SB_TERR_SNAP  or {}   -- gesicherte Blasen: [key] = { reg=TerrainRegion, corner=Vector3int16 }
 local TERR_SNAP_MAX = 400                 -- Deckel, sonst waechst der Speicher endlos
@@ -1214,6 +1268,11 @@ local function startFarm()
       g.SB_TERR_WIPED = true                       -- global geloescht -> nur ein Rejoin holt das zurueck
     end
     while g.SB_FARM do
+      -- Ohne Wand kein Cast: erst aus dem Backpack anlegen, sonst Charakter zuruecksetzen.
+      if not ensureWand(g.SB_FARM_FIXWAND) then
+        g.SB_STATUS, g.SB_FARM_TARGET = "keine Wand - warte", nil
+        task.wait(0.5)
+      else
       local targets = farmTargets()
       if #targets == 0 then
         g.SB_FARM_TARGET = nil
@@ -1245,6 +1304,7 @@ local function startFarm()
         end
         g.SB_FARM_TARGET = nil
         if not g.SB_FARM_REPEAT then g.SB_FARM = false end
+      end
       end
       task.wait(tonumber(g.SB_FARM_ROUND) or 0.5)
     end
@@ -1686,7 +1746,7 @@ local CFG_KEYS = {
   "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
-  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT",
+  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
   "SB_KD_PAUSE", "SB_KD_LIMIT",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
@@ -2535,7 +2595,9 @@ local function mountGui()
         function() g.SB_FARM_REPEAT = not g.SB_FARM_REPEAT end)
       makeToggleW(sf, 13, "Am Ende zurueck", function() return g.SB_FARM_RETURN == true end,
         function() g.SB_FARM_RETURN = not g.SB_FARM_RETURN end)
-      addInfo(sf, 14, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
+      makeToggleW(sf, 14, "Ohne Wand: Reset", function() return g.SB_FARM_FIXWAND == true end,
+        function() g.SB_FARM_FIXWAND = not g.SB_FARM_FIXWAND end)
+      addInfo(sf, 15, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
     end)
   addModule(farm, "KD-Farm",
     function() return g.SB_KD end,
@@ -2575,71 +2637,6 @@ local function mountGui()
   addModule(util, "Chams (sichtbar)",
     function() return g.SB_CHAMS end,
     function(v) g.SB_CHAMS = v; if v then startVisuals() end end)
-
-  -- Freunde: von Silent-Aim UND Autofarm ausgenommen, per UserId in einer Datei gemerkt
-  addAction(util, function() return "Freunde (" .. friendCount() .. ")" end,
-    function() end,
-    function(sf)
-      makeToggleW(sf, 1, "Roblox-Freunde automatisch",
-        function() return g.SB_FRIEND_AUTO == true end,
-        function() g.SB_FRIEND_AUTO = not g.SB_FRIEND_AUTO; saveFriends() end)
-      local l1 = Instance.new("TextLabel"); l1.Size = UDim2.new(1, -12, 0, 16); l1.LayoutOrder = 2
-      l1.BackgroundTransparency = 1; l1.Font = Enum.Font.GothamBold; l1.TextSize = 11
-      l1.TextColor3 = Color3.fromRGB(160, 160, 180); l1.TextXAlignment = Enum.TextXAlignment.Left
-      l1.Text = "Im Server:"; l1.Parent = sf
-      local others = {}
-      for _, pl in ipairs(Players:GetPlayers()) do if pl ~= lp then others[#others + 1] = pl end end
-      table.sort(others, function(a, b) return a.Name:lower() < b.Name:lower() end)
-      if #others == 0 then
-        local none = Instance.new("TextLabel"); none.Size = UDim2.new(1, -12, 0, 18); none.LayoutOrder = 3
-        none.BackgroundTransparency = 1; none.Font = Enum.Font.Gotham; none.TextSize = 11
-        none.TextColor3 = Color3.fromRGB(150, 150, 165); none.TextXAlignment = Enum.TextXAlignment.Left
-        none.Text = "  keine anderen Spieler"; none.Parent = sf
-      else
-        local ROW, MAXR = 22, 6
-        local scr = Instance.new("ScrollingFrame"); scr.LayoutOrder = 3
-        scr.Size = UDim2.new(1, 0, 0, math.min(#others, MAXR) * ROW); scr.BackgroundTransparency = 1
-        scr.BorderSizePixel = 0; scr.ScrollBarThickness = 4; scr.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
-        scr.CanvasSize = UDim2.fromOffset(0, #others * ROW); scr.ScrollingDirection = Enum.ScrollingDirection.Y
-        scr.Parent = sf
-        local sl = Instance.new("UIListLayout", scr); sl.SortOrder = Enum.SortOrder.LayoutOrder
-        for i, pl in ipairs(others) do
-          makeToggleW(scr, i, pl.Name,
-            function() return g.SB_FRIENDS[tostring(pl.UserId)] ~= nil end,
-            function() toggleFriend(pl) end)
-        end
-      end
-      -- gespeicherte Freunde, die gerade nicht im Server sind (Haken weg = loeschen)
-      local off = {}
-      for id, nm in pairs(g.SB_FRIENDS) do
-        if not Players:GetPlayerByUserId(tonumber(id) or 0) then off[#off + 1] = { id = id, nm = nm } end
-      end
-      table.sort(off, function(a, b) return tostring(a.nm):lower() < tostring(b.nm):lower() end)
-      if #off > 0 then
-        local l2 = Instance.new("TextLabel"); l2.Size = UDim2.new(1, -12, 0, 16); l2.LayoutOrder = 4
-        l2.BackgroundTransparency = 1; l2.Font = Enum.Font.GothamBold; l2.TextSize = 11
-        l2.TextColor3 = Color3.fromRGB(160, 160, 180); l2.TextXAlignment = Enum.TextXAlignment.Left
-        l2.Text = "Gespeichert (offline):"; l2.Parent = sf
-        local ROW, MAXR = 22, 5
-        local scr2 = Instance.new("ScrollingFrame"); scr2.LayoutOrder = 5
-        scr2.Size = UDim2.new(1, 0, 0, math.min(#off, MAXR) * ROW); scr2.BackgroundTransparency = 1
-        scr2.BorderSizePixel = 0; scr2.ScrollBarThickness = 4; scr2.ScrollBarImageColor3 = Color3.fromRGB(120, 110, 160)
-        scr2.CanvasSize = UDim2.fromOffset(0, #off * ROW); scr2.ScrollingDirection = Enum.ScrollingDirection.Y
-        scr2.Parent = sf
-        local sl2 = Instance.new("UIListLayout", scr2); sl2.SortOrder = Enum.SortOrder.LayoutOrder
-        for i, e in ipairs(off) do
-          makeToggleW(scr2, i, tostring(e.nm),
-            function() return g.SB_FRIENDS[e.id] ~= nil end,
-            function() g.SB_FRIENDS[e.id] = (g.SB_FRIENDS[e.id] == nil) and e.nm or nil; saveFriends() end)
-        end
-      end
-      local fi = Instance.new("TextLabel"); fi.Size = UDim2.new(1, -12, 0, 54); fi.LayoutOrder = 6
-      fi.BackgroundTransparency = 1; fi.Font = Enum.Font.Gotham; fi.TextSize = 11
-      fi.TextColor3 = Color3.fromRGB(150, 150, 170); fi.TextWrapped = true
-      fi.TextXAlignment = Enum.TextXAlignment.Left
-      fi.Text = "Freunde werden von Silent-Aim und Autofarm ausgelassen. Gespeichert per UserId in spellbound_friends.json - bleibt nach Rejoin."
-      fi.Parent = sf
-    end)
   -- Staff-Optionen (aufklappbar): Silent-Aim fuer Staff aussetzen + Staff hervorheben
   addAction(util, function() return "Staff-Optionen" end,
     function() end,
