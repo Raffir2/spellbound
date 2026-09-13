@@ -991,6 +991,12 @@ local function startUltra()
   local fake = UIS:GetMouseLocation()
   local cursorConn = RunService.RenderStepped:Connect(function(dt)
     if not g.SB_ULTRA then return end
+    if not g.SB_AIM then
+      -- Silent-Aim aus: Ultra fasst Maus und Cursor ueberhaupt nicht an (nur die Rad-Rotation laeuft)
+      if fakeGui then stopUltraCursor() end
+      fake = UIS:GetMouseLocation()
+      return
+    end
     pcall(function()
       local real = UIS:GetMouseLocation()
       local desired = real
