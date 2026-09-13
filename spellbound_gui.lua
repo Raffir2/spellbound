@@ -196,6 +196,12 @@ g.SB_OBSC_VIS = nil               -- alte Kopf-Anzeige loesen (GUI wird neu geba
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
+g.SB_ULTRA, g.SB_ULTRA_LOOP = false, false -- Ultra Legit beim Reload aus
+g.SB_AIM_POINT = nil
+pcall(function()                           -- evtl. vom Fake-Zeiger ueberschriebene Mausposition freigeben
+  local pmR = require(game:GetService("ReplicatedStorage").shared.modules.PlayerMouse):GetMouse()
+  rawset(pmR, "Position", nil)
+end)
 g.SB_SEAL_ATTUNE_LOOP = false
 g.SB_SEALFARM, g.SB_SEALFARM_LOOP = false, false -- Seal-Farm beim Reload aus
 g.SB_NOFOG = false                         -- Nebel-Entferner: vorerst ausgebaut
@@ -372,18 +378,21 @@ local function fireSafeSlot(instant)
   local ROT = g.SB_SAFE_ROT
   local idx = g.SB_ROT_IDX
   local spell = ROT[idx] or ROT[1]
-  if not instant then
+  if not instant and not g.SB_ULTRA then           -- Ultra Legit laedt nur ueber das Spell-Rad
     state.casts = 0
     set(spell, true)
     task.wait(0.07)                                -- Server den Load registrieren lassen
   end
+  local fired = false
   if state.loadedSpell == spell then
     state.casts = 0
     pcall(fire, target)
+    fired = true
     g.SB_CASTS = (tonumber(g.SB_CASTS) or 0) + 1
     g.SB_LOADED = spell
   end
   g.SB_PRELOADED = nil
+  if g.SB_ULTRA and not fired then return end      -- Rad-Spell noch nicht geladen: nicht weiterruecken
   g.SB_LAST_CAST = os.clock()
   g.SB_ROT_IDX = (idx % #ROT) + 1                  -- IMMER weiterrotieren (kein Haengenbleiben)
 end
@@ -410,7 +419,7 @@ local function castCurrent()
     g.SB_APPA_PENDING = false; g.SB_LAST_CAST = os.clock(); return
   end
   if not g.SB_SAFE then return end
-  fireSafeSlot(g.SB_PRELOADED ~= nil)
+  fireSafeSlot(g.SB_ULTRA or g.SB_PRELOADED ~= nil)
 end
 
 local function startSelector()
@@ -455,7 +464,7 @@ local function startSelector()
         end
         g.SB_STATUS = nil
         -- Vor-Equip: nach 0.4s ohne Cast den aktuellen Slot schon laden (naechster Klick feuert sofort)
-        if g.SB_SAFE and not g.SB_FARM and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
+        if g.SB_SAFE and not g.SB_ULTRA and not g.SB_FARM and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
            and os.clock() >= (g.SB_APPA_LOCK or 0)
            and refs and refs.set and refs.state and not isStunnedOrBound() then
           if (os.clock() - (g.SB_LAST_CAST or 0)) >= 0.4 then
@@ -704,13 +713,13 @@ local function startAim()
   if not (okM and pm) then g.SB_AIM_LOOP = false; return end
   local u13 = pm:GetMouse()
   local aimConn = RunService.RenderStepped:Connect(function()
-    if not g.SB_AIM then rawset(u13, "Hit", nil); return end
+    if not g.SB_AIM then rawset(u13, "Hit", nil); g.SB_AIM_POINT = nil; return end
     -- Legitness: fuer kurze Fenster (~0.2s) den Aim ganz aussetzen -> so viel % der Shots gehen daneben
     if os.clock() >= (g.SB_LEGIT_AIMNEXT or 0) then
       g.SB_LEGIT_AIMOFF = legitFail()
       g.SB_LEGIT_AIMNEXT = os.clock() + 0.2
     end
-    if g.SB_LEGIT_AIMOFF then rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; return end
+    if g.SB_LEGIT_AIMOFF then rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; g.SB_AIM_POINT = nil; return end
     local cam = workspace.CurrentCamera
     local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     if not (cam and myHRP) then rawset(u13, "Hit", nil); return end
@@ -755,10 +764,134 @@ local function startAim()
     if bestH then
       local zonePart, zoneOff = aimZone(bestChar, bestH)     -- mal Kopf, mal Arm, mal Torso
       local aimPos = aimPointFor(origin, zonePart, bestHum, speed) + zoneOff
-      rawset(u13, "Hit", CFrame.new(aimPos)); g.SB_AIM_TARGET = bestName
-    else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil end
+      g.SB_AIM_TARGET = bestName
+      if g.SB_ULTRA then
+        -- Ultra Legit: kein harter Treffpunkt - der Fake-Zeiger gleitet zu diesem Punkt,
+        -- Hit folgt dem Zeiger (PlayerMouse berechnet Hit aus Position)
+        g.SB_AIM_POINT = aimPos; rawset(u13, "Hit", nil)
+      else
+        g.SB_AIM_POINT = nil; rawset(u13, "Hit", CFrame.new(aimPos))
+      end
+    else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; g.SB_AIM_POINT = nil end
   end)
   table.insert(g.SB_CONNS, aimConn)
+end
+
+
+--========================= Ultra Legit =========================--
+-- Sieht fuer Zuschauer/Aufnahmen aus wie normales Spielen:
+--   1. Fake-Zeiger: das Spiel blendet den echten Mauszeiger schon aus (MouseIconEnabled=false)
+--      und zeichnet PriorityUserInterface.Mouse an die echte Mausposition. Im Ultra-Modus wird
+--      dieser Cursor jedes Frame auf eine GEGLAETTETE Position gesetzt: ohne Ziel folgt sie der
+--      echten Maus, mit Silent-Aim-Ziel gleitet sie zum Zielpunkt statt zu springen.
+--      PlayerMouse berechnet Hit/Target/Origin aus Position -> rawset(Position) laesst den Schuss
+--      genau dorthin gehen, wo der Fake-Zeiger steht.
+--   2. Spell-Auswahl ueber das echte Spell-Rad: R antippen (oeffnet das Rad ueber den Handler
+--      des Spiels), den Slot mit dem naechsten Rotations-Spell hovern (Vorschau + Sound) und
+--      anklicken -> useBind -> bindClicked -> LOAD_SPELL, das Spiel schliesst das Rad selbst.
+--      Die Richtungsauswahl des Spiels greift nur bei GEHALTENEM R und stoert daher nicht.
+--   3. Gefeuert wird nur, wenn der Rad-Spell wirklich geladen ist; die Rotation rueckt nur nach
+--      einem echten Schuss weiter. Kein unsichtbares Vorladen.
+g.SB_ULTRA_SMOOTH = tonumber(g.SB_ULTRA_SMOOTH) or 10     -- Glaettung (hoeher = schneller am Ziel)
+g.SB_ULTRA_WHEEL  = tonumber(g.SB_ULTRA_WHEEL)  or 0.25   -- Reaktionszeit nach dem Schuss bis R
+g.SB_ULTRA_HOVER  = tonumber(g.SB_ULTRA_HOVER)  or 0.14   -- wie lange der Slot gehovert wird
+
+local function wheelSlotFor(spell)
+  local pg = lp:FindFirstChild("PlayerGui")
+  local sw = pg and pg:FindFirstChild("SpellWheel")
+  local cont = sw and sw:FindFirstChild("Container")
+  local binds = cont and cont:FindFirstChild("Binds")
+  if not binds then return nil end
+  for _, slot in ipairs(binds:GetChildren()) do
+    if slot:GetAttribute("incantation") == spell then return slot end
+  end
+  return nil
+end
+
+-- Spell ueber das echte Rad auswaehlen. true, wenn der Klick abgesetzt wurde.
+local function wheelSelect(spell)
+  local slot = wheelSlotFor(spell)
+  local input = slot and slot:FindFirstChild("_Input")
+  if not input then return false, "nicht im Rad" end
+  if UIS:GetFocusedTextBox() then return false, "Textfeld aktiv" end
+  if lp:GetAttribute("Client_IsClashing") == true then return false, "im Clash" end
+  pcall(function() keypress(0x52) end)                     -- R antippen: Rad oeffnen
+  task.wait(0.03)
+  pcall(function() keyrelease(0x52) end)
+  task.wait(0.08 + math.random() * 0.06)
+  local okE, enters = pcall(getconnections, input.MouseEnter)
+  for _, c in ipairs(okE and enters or {}) do pcall(function() c:Fire() end) end
+  task.wait(math.max(tonumber(g.SB_ULTRA_HOVER) or 0.14, 0.03) * (0.85 + math.random() * 0.3))
+  local okC, clicks = pcall(getconnections, input.MouseButton1Click)
+  for _, c in ipairs(okC and clicks or {}) do pcall(function() c:Fire() end) end
+  -- blieb das Rad offen (z.B. Spell auf Abklingzeit), wieder schliessen
+  task.delay(0.35, function()
+    local cont = slot.Parent and slot.Parent.Parent
+    if cont and cont:IsA("GuiObject") and cont.Visible then
+      pcall(function() require(RS.import)("bridges/localSpellWheel"):Fire("CLOSE_WHEEL") end)
+    end
+  end)
+  return true
+end
+
+local function stopUltraCursor()
+  pcall(function()
+    local pmS = require(RS.shared.modules.PlayerMouse):GetMouse()
+    rawset(pmS, "Position", nil)
+  end)
+end
+
+local function startUltra()
+  if g.SB_ULTRA_LOOP then return end
+  g.SB_ULTRA_LOOP = true
+  startSelector()
+  local okM, pmMod = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
+  local mouseObj = okM and pmMod and pmMod:GetMouse() or nil
+  local fake = UIS:GetMouseLocation()
+  -- Fake-Zeiger: nach dem Cursor-Update des Spiels (spaeter verbunden -> laeuft danach)
+  local cursorConn = RunService.RenderStepped:Connect(function(dt)
+    if not g.SB_ULTRA then return end
+    pcall(function()
+      local real = UIS:GetMouseLocation()
+      local desired = real
+      local point = g.SB_AIM and g.SB_AIM_POINT
+      local cam = workspace.CurrentCamera
+      if point and cam then
+        local sp, on = cam:WorldToViewportPoint(point)
+        if on and sp.Z > 0 then desired = Vector2.new(sp.X, sp.Y) end
+      end
+      local k = 1 - math.exp(-(tonumber(g.SB_ULTRA_SMOOTH) or 10) * math.min(dt, 0.1))
+      fake = fake + (desired - fake) * k
+      if mouseObj then rawset(mouseObj, "Position", fake); rawset(mouseObj, "Hit", nil) end
+      local pg = lp:FindFirstChild("PlayerGui")
+      local pui = pg and pg:FindFirstChild("PriorityUserInterface")
+      local cur = pui and pui:FindFirstChild("Mouse")
+      if cur then cur.Position = UDim2.fromOffset(fake.X - 11, fake.Y - 8) end
+    end)
+  end)
+  table.insert(g.SB_CONNS, cursorConn)
+  -- Spell-Auswahl: fehlt der naechste Rotations-Spell, nach der Reaktionszeit ueber das Rad holen
+  task.spawn(function()
+    local nextTry = 0
+    while g.SB_ULTRA do
+      pcall(function()
+        local refs = g.SB_REFS
+        if not (g.SB_SAFE and refs and refs.state and refs.state.equipped) then return end
+        if g.SB_CASTING or g.SB_APPA_PENDING or isStunnedOrBound() then return end
+        local ROT = g.SB_SAFE_ROT
+        local spell = ROT[g.SB_ROT_IDX] or ROT[1]
+        if refs.state.loadedSpell == spell then return end
+        if os.clock() < nextTry then return end
+        if os.clock() - (g.SB_LAST_CAST or 0) < (tonumber(g.SB_ULTRA_WHEEL) or 0.25) then return end
+        nextTry = os.clock() + 1.2                  -- nicht im Kreis klicken, falls es nicht laedt
+        local ok, why = wheelSelect(spell)
+        g.SB_ULTRA_STATUS = ok and ("Rad: " .. tostring(spell)) or ("Rad: " .. tostring(why))
+      end)
+      task.wait(0.1)
+    end
+    stopUltraCursor()
+    g.SB_ULTRA_LOOP = false
+  end)
 end
 
 --========================= Visuals: Box-ESP / Namen / Chams =========================--
@@ -2676,6 +2809,7 @@ local CFG_KEYS = {
   "SB_AIM_FOV", "SB_AIM_RANGE", "SB_AIM_PRED", "SB_AIM_NPC", "SB_AIM_PROJSPEED",
   "SB_AIM_SKIP_STAFF", "SB_AIM_ZONES", "SB_AIM_ZONEROLL",
   "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
+  "SB_ULTRA_SMOOTH", "SB_ULTRA_WHEEL", "SB_ULTRA_HOVER",
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
   "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_CLASH", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
@@ -2691,7 +2825,7 @@ local CFG_KEYS = {
 }
 local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS", "SB_DEWAND_LIST" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
-local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE", "SB_OBSC",
+local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE", "SB_ULTRA", "SB_OBSC",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
 local CFG_HOTMODS = { "SB_FARM", "SB_KD", "SB_SHOT" }   -- greifen von selbst ins Spiel ein
 -- Streamproof bleibt bewusst draussen: gespeichert "an" waere die GUI nach dem Laden
@@ -2762,6 +2896,7 @@ local function cfgApplyModules(mods)
     g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto(); startSealAttune() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     g.SB_SAFE = on("SB_SAFE");     if g.SB_SAFE then startSelector() end
+    g.SB_ULTRA = on("SB_ULTRA");   if g.SB_ULTRA then startSelector(); startUltra() end
     g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = on("SB_TEAM_ESP"), on("SB_ESP_NAMES"), on("SB_CHAMS")
     if g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS or g.SB_STAFF_ESP then startVisuals() end
   end
@@ -3510,6 +3645,25 @@ local function mountGui()
       end
     end)
 
+  addModule(combat, "Ultra Legit",
+    function() return g.SB_ULTRA end,
+    function(v)
+      g.SB_ULTRA = v
+      if v then startSelector(); startUltra() else stopUltraCursor() end
+    end,
+    function(sf)
+      makeSliderW(sf, 1, "Aim-Glaettung", 2, 30, function() return tonumber(g.SB_ULTRA_SMOOTH) or 10 end,
+        function(v) g.SB_ULTRA_SMOOTH = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1f", v) end)
+      makeSliderW(sf, 2, "Reaktion bis Rad", 0, 1, function() return tonumber(g.SB_ULTRA_WHEEL) or 0.25 end,
+        function(v) g.SB_ULTRA_WHEEL = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      makeSliderW(sf, 3, "Hover-Dauer", 0.03, 0.4, function() return tonumber(g.SB_ULTRA_HOVER) or 0.14 end,
+        function(v) g.SB_ULTRA_HOVER = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      addInfo(sf, 4, "Braucht Safe-Combat (und Silent-Aim fuer das Zielen). Waehlt jeden Spell sichtbar ueber das Spell-Rad (R, Hover, Klick) und zeigt einen Fake-Zeiger, der weich zum Ziel gleitet - der Schuss geht dorthin, wo der Zeiger steht. Die Rotations-Spells muessen im Rad liegen.", 88)
+    end)
+
   -- === Troll-Panel ===
   local troll = makePanel("Troll", 26, 40 + 210)
   addModule(troll, "Shotgun",
@@ -3864,6 +4018,7 @@ local function mountGui()
     { "Auto-Seal",   function() return g.SB_SEAL end },
     { "Auto-Dodge",  function() return g.SB_DODGE end },
     { "Safe-Combat", function() return g.SB_SAFE end },
+    { "Ultra Legit", function() return g.SB_ULTRA end },
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
     { "De-Wand",     function() return g.SB_DEWAND end },
