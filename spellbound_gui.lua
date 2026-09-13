@@ -7,7 +7,10 @@
 --       wechselt dabei (Torso/Kopf/Arme + Offset), damit es nicht nach Bot aussieht.
 --   AUTO-SHIELD: reaktives Protego gegen eingehende Casts.
 --   AUTO-CLASH: gewinnt das Clash-Minigame automatisch (echter Space-Input, kein Miss-Stun).
---   AUTO-SEAL: spielt das Bogen-Minigame vom Clash Seal (Boegen aus dem Server-Seed nachgerechnet).
+--   AUTO-SEAL: Clash Seal - attunet per Cast auf den Orb, spielt dann das Bogen-Minigame
+--       (Boegen aus dem Server-Seed nachgerechnet).
+--   SEAL-FARM (Farm-Panel): teleportiert zum aktiven Seal - Clash attunen + Boegen,
+--       Blood NPC-Wellen killen, Crown in Reichweite am Leben bleiben.
 --   SHOTGUN (Troll): feuert NUR auf Linksklick, dann 6 Combat-Spells am Stueck (1 Frame
 --       Abstand) aus den eigenen Bind-Sets, alphabetisch rotierend.
 --   SNIPE (E): Tarnschuss aufs Silent-Aim-Ziel, punktgenau zum Einschlag TP unter das Ziel,
@@ -52,6 +55,8 @@ g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
+g.SB_SEAL_ATTUNE_LOOP = false
+g.SB_SEALFARM, g.SB_SEALFARM_LOOP = false, false -- Seal-Farm beim Reload aus
 g.SB_NOFOG = false                         -- Nebel-Entferner: vorerst ausgebaut
 g.SB_FARM_HOME, g.SB_FARM_TARGET = nil, nil
 pcall(function()                            -- evtl. verankertes HRP eines alten Farm-Laufs freigeben
@@ -1339,6 +1344,7 @@ end
 
 local function startFarm()
   if g.SB_FARM_LOOP then return end
+  if g.SB_SEALFARM then g.SB_FARM = false; g.SB_STATUS = "Seal-Farm laeuft"; return end
   g.SB_FARM_LOOP = true
   startSelector()                                  -- haelt g.SB_REFS/Wand-Closures aktuell
   task.spawn(function()
@@ -1404,6 +1410,187 @@ local function startFarm()
   end)
 end
 
+--========================= Seal-Zustand (geteilt) =========================--
+-- Letzten sealStateSync vom Server merken: liefert Seal-ID, Typ, Ort, Status und ob man in
+-- Reichweite ist. Genutzt von Seal-Farm und dem Clash-Seal-Attunen.
+if not g.SB_SEALSTATE_HOOKED and okPk and packets and packets.sealStateSync then
+  g.SB_SEALSTATE_HOOKED = true
+  packets.sealStateSync.listen(function(d) g.SB_SEAL_LAST = d end)
+end
+
+local function sealModel(st)
+  local seals = workspace.Terrain:FindFirstChild("seals")
+  return seals and st and st.sealLocation and seals:FindFirstChild(st.sealLocation) or nil
+end
+
+-- Orb des aktiven Seals (Ziel fuers Attunen beim Clash Seal)
+local function sealOrbPart(st)
+  local loc = sealModel(st)
+  local act = loc and loc:FindFirstChild("__ActiveSealModel")
+  if not act then return nil end
+  local orb = act:FindFirstChild("OrbCenter", true)
+  if orb and orb:IsA("BasePart") then return orb end
+  return act:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- Clash Seal attunen: laut Spiel "Cast near the Seal orb to attune, then land clash hits".
+-- Gemessen: nur in Reichweite stehen startet nichts (kein myArcSeed, isContesting=false).
+-- Gibt true zurueck, wenn gecastet wurde.
+local function sealAttuneOnce(st)
+  if not (st and st.hasActiveSeal and st.sealType == "Clash Seal" and st.sealState == "Active"
+          and st.myInRange and st.myArcSeed == nil) then return false end
+  local orb = sealOrbPart(st)
+  if not (orb and ensureWand(false)) or isStunnedOrBound() then return false end
+  if farmCast(orb, nil) then
+    g.SB_SEAL_STATUS = "attune: Cast auf den Orb"
+    g.SB_SEAL_ATTUNES = (tonumber(g.SB_SEAL_ATTUNES) or 0) + 1
+    return true
+  end
+  return false
+end
+
+-- Eigenstaendiges Attunen fuer Auto-Seal (wenn man selbst zum Seal laeuft)
+local function startSealAttune()
+  if g.SB_SEAL_ATTUNE_LOOP then return end
+  g.SB_SEAL_ATTUNE_LOOP = true
+  startSelector()
+  task.spawn(function()
+    while g.SB_SEAL do
+      if not g.SB_SEALFARM and sealAttuneOnce(g.SB_SEAL_LAST) then task.wait(1.5) else task.wait(0.5) end
+    end
+    g.SB_SEAL_ATTUNE_LOOP = false
+  end)
+end
+
+--========================= Seal-Farm =========================--
+-- Autofarm fuer Seals (zeitlich begrenzte Welt-Events an festen Orten). Erkennt den aktiven
+-- Seal ueber sealStateSync, teleportiert hin und macht je nach Typ das Richtige:
+--   Clash Seal: in Reichweite halten, auf den Orb casten (attunen), die Boegen spielt
+--               Auto-Seal (wird waehrend der Seal-Farm automatisch mitgeschaltet).
+--   Blood Seal: Seal-NPCs (Attribut IsBloodSealNpc + BloodSealId) der Reihe nach killen -
+--               unter den NPC, casten bis er tot ist. Schaden UND Kills zaehlen zum Beitrag.
+--               Keine NPCs gerade -> am Seal warten.
+--   Crown Seal: in Reichweite am Leben bleiben (Kontrollzeit zaehlt) -> verankert halten.
+-- Bei "Sealed" geht es schon vor dem Oeffnen hin (Ankuendigung: vor Active da sein).
+-- Gehalten wird standardmaessig UNTER dem Seal (unsichtbar, schwer zu treffen). Zaehlt der
+-- Server das nach 3s nicht als "In Range", wird fuer diesen Seal an der Oberflaeche gehalten.
+-- Startet bewusst NIE automatisch aus der Config.
+g.SB_SEALFARM_DELAY = tonumber(g.SB_SEALFARM_DELAY) or 0.25   -- Pause zwischen zwei Casts
+g.SB_SEALFARM_MAXCASTS = tonumber(g.SB_SEALFARM_MAXCASTS) or 8 -- max. Casts pro NPC, dann weiter
+if g.SB_SEALFARM_RETURN == nil then g.SB_SEALFARM_RETURN = true end
+if g.SB_SEALFARM_UNDER  == nil then g.SB_SEALFARM_UNDER = true end   -- unter dem Seal halten
+
+-- lebende Blood-NPCs des aktiven Seals, naechster zuerst
+local function bloodTargets(st)
+  local sealId = st and st.sealId
+  local folder = workspace.Terrain:FindFirstChild("characters")
+  local myHRP  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  local me     = myHRP and myHRP.Position or Vector3.zero
+  local list   = {}
+  for _, m in ipairs(folder and folder:GetChildren() or {}) do
+    if m:IsA("Model") and m:GetAttribute("IsBloodSealNpc") == true
+       and (sealId == nil or m:GetAttribute("BloodSealId") == sealId) then
+      local hum  = m:FindFirstChildOfClass("Humanoid")
+      local root = m:FindFirstChild("HumanoidRootPart") or m.PrimaryPart
+      if hum and root and hum.Health > 0 then
+        list[#list + 1] = { m = m, hum = hum, root = root, d = (root.Position - me).Magnitude }
+      end
+    end
+  end
+  table.sort(list, function(a, b) return a.d < b.d end)
+  return list
+end
+
+-- einen Blood-NPC bearbeiten, bis er tot ist oder das Cast-Limit erreicht ist
+local function bloodKillOne(t)
+  g.SB_FARM_TARGET = t.m.Name
+  local casts, maxCasts = 0, math.max(tonumber(g.SB_SEALFARM_MAXCASTS) or 8, 1)
+  while g.SB_SEALFARM and t.m.Parent and t.hum.Health > 0 and casts < maxCasts do
+    local depth = tonumber(g.SB_FARM_DEPTH) or 15
+    local spot  = t.root.Position - Vector3.new(0, depth, 0)
+    if not farmTeleport(spot) then break end
+    if g.SB_FARM_CARVE and not g.SB_TERR_WIPED then carveShaft(spot, t.root.Position) end
+    task.wait(tonumber(g.SB_FARM_DELAY) or 0.25)
+    if not (t.m.Parent and t.hum.Health > 0) then break end
+    if not isStunnedOrBound() and farmCast(t.root, t.hum) then casts = casts + 1 end
+    g.SB_SEALFARM_STATUS = string.format("Blood: %s  HP %.0f  (%d Casts)", t.m.Name, t.hum.Health, casts)
+    task.wait(math.max(tonumber(g.SB_SEALFARM_DELAY) or 0.25, 0.05))
+  end
+  if not (t.m.Parent and t.hum.Health > 0) then
+    g.SB_SEALFARM_KILLS = (tonumber(g.SB_SEALFARM_KILLS) or 0) + 1
+  end
+end
+
+local function startSealFarm()
+  if g.SB_SEALFARM_LOOP then return end
+  if g.SB_FARM then g.SB_SEALFARM, g.SB_SEALFARM_STATUS = false, "Autofarm laeuft"; return end
+  g.SB_SEALFARM_LOOP = true
+  startSelector()
+  -- Clash-Boegen spielt Auto-Seal: fuer die Dauer der Seal-Farm mitschalten
+  local sealWasOn = g.SB_SEAL
+  g.SB_SEAL = true
+  startSealAuto()
+  task.spawn(function()
+    local hrp0 = farmHRP(false)
+    local home = hrp0 and hrp0.CFrame
+    local surfaceFor, notInRangeSince, lastAttune = nil, nil, 0
+    while g.SB_SEALFARM do
+      local st = g.SB_SEAL_LAST
+      local live = st and st.hasActiveSeal and (st.sealState == "Active" or st.sealState == "Sealed")
+      local loc = live and sealModel(st)
+      if not loc then
+        g.SB_SEALFARM_STATUS, g.SB_FARM_TARGET = "warte auf Seal", nil
+        task.wait(1)
+      elseif not ensureWand(g.SB_FARM_FIXWAND) then
+        g.SB_SEALFARM_STATUS = "keine Wand - warte"
+        task.wait(0.5)
+      else
+        local targets = (st.sealType == "Blood Seal" and st.sealState == "Active") and bloodTargets(st) or {}
+        if #targets > 0 then
+          bloodKillOne(targets[1])
+        else
+          -- am Seal halten: unter dem Zentrum, ausser dieser Seal zaehlt das nicht als Reichweite
+          g.SB_FARM_TARGET = nil
+          local center = loc:GetPivot().Position
+          local under  = g.SB_SEALFARM_UNDER and surfaceFor ~= st.sealId
+          local depth  = tonumber(g.SB_FARM_DEPTH) or 15
+          local spot   = under and (center - Vector3.new(0, depth, 0)) or (center + Vector3.new(0, 3, 0))
+          if farmTeleport(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
+            carveShaft(spot, center)                 -- Schacht nach oben, damit Casts rauskommen
+          end
+          if st.sealState == "Active" then
+            if st.myInRange then
+              notInRangeSince = nil
+            else
+              notInRangeSince = notInRangeSince or os.clock()
+              if under and os.clock() - notInRangeSince > 3 then
+                surfaceFor, notInRangeSince = st.sealId, nil   -- unten zaehlt nicht -> hoch
+              end
+            end
+            if st.sealType == "Clash Seal" and os.clock() - lastAttune > 1.5 and sealAttuneOnce(st) then
+              lastAttune = os.clock()
+            end
+          end
+          g.SB_SEALFARM_STATUS = string.format("%s @ %s: %s, %s%s", tostring(st.sealType),
+            tostring(st.sealLocation), tostring(st.sealState), tostring(st.myRangeState),
+            under and " (unten)" or "")
+          task.wait(0.5)
+        end
+      end
+    end
+    -- Aufraeumen: Schaechte zu (sonst faellt man beim Entankern), dann heim und entankern
+    g.SB_SEAL = sealWasOn
+    pcall(restoreMap)
+    local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+    if hrp then
+      if g.SB_SEALFARM_RETURN and home then pcall(function() hrp.CFrame = home end) end
+      hrp.Anchored = false
+      hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+    g.SB_FARM_TARGET, g.SB_SEALFARM_LOOP = nil, false
+  end)
+end
+
 --===================== SNIPE (Taste M): 1 Ziel, unter die Map, 1 Spell =====================--
 -- Einzelschuss-Variante des Autofarms: nimmt das aktuelle Silent-Aim-Ziel (sonst den Spieler
 -- am naechsten zum Cursor), merkt sich die eigene Position, teleportiert direkt UNTER das Ziel,
@@ -1449,7 +1636,7 @@ end
 
 local function doSnipe()
   if g.SB_SNIPE_BUSY then return end
-  if g.SB_FARM then g.SB_SNIPE_STATUS = "Autofarm laeuft"; return end   -- der fasst die Position selbst an
+  if g.SB_FARM or g.SB_SEALFARM then g.SB_SNIPE_STATUS = "Farm laeuft"; return end   -- der fasst die Position selbst an
   local pl = snipePickTarget()
   local ch   = pl and pl.Character
   local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
@@ -1830,6 +2017,7 @@ local CFG_KEYS = {
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
   "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
   "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
+  "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
@@ -1900,7 +2088,7 @@ local function cfgApplyModules(mods)
     g.SB_AIM = on("SB_AIM");       if g.SB_AIM then startSelector(); startAim() end
     g.SB_SHIELD = on("SB_SHIELD"); if g.SB_SHIELD then hookShield() end
     g.SB_CLASH = on("SB_CLASH");   if g.SB_CLASH then startClashAuto() end
-    g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto() end
+    g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto(); startSealAttune() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     g.SB_SAFE = on("SB_SAFE");     if g.SB_SAFE then startSelector() end
     g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = on("SB_TEAM_ESP"), on("SB_ESP_NAMES"), on("SB_CHAMS")
@@ -2576,12 +2764,12 @@ local function mountGui()
     function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
   addModule(combat, "Auto-Seal",
     function() return g.SB_SEAL end,
-    function(v) g.SB_SEAL = v; if v then startSealAuto() end end,
+    function(v) g.SB_SEAL = v; if v then startSealAuto(); startSealAttune() end end,
     function(sf)
       makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
         function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
         function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 2, "Spielt das Bogen-Minigame vom Clash Seal: rechnet den aktiven Bogen aus dem Seed des Servers nach und trifft die Mitte (bei Ueberlappung den Bonus). Der normale Auto-Clash greift hier nicht - eigenes Paket, eigene GUI.", 76)
+      addInfo(sf, 2, "Clash Seal: castet in Reichweite automatisch auf den Orb (attunen), danach wird jeder Bogen aus dem Seed des Servers nachgerechnet und mittig getroffen (bei Ueberlappung der Bonus). Der normale Auto-Clash greift hier nicht - eigenes Paket, eigene GUI.", 76)
     end)
   addModule(combat, "Auto-Dodge",
     function() return g.SB_DODGE end,
@@ -2691,6 +2879,25 @@ local function mountGui()
         function() g.SB_FARM_FIXWAND = not g.SB_FARM_FIXWAND end)
       addInfo(sf, 15, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
     end)
+  addModule(farm, "Seal-Farm",
+    function() return g.SB_SEALFARM end,
+    function(v) g.SB_SEALFARM = v; if v then startSealFarm() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Pause zwischen Casts", 0.05, 1.5, function() return tonumber(g.SB_SEALFARM_DELAY) or 0.25 end,
+        function(v) g.SB_SEALFARM_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      makeSliderW(sf, 2, "Max. Casts pro NPC", 1, 30, function() return tonumber(g.SB_SEALFARM_MAXCASTS) or 8 end,
+        function(v) g.SB_SEALFARM_MAXCASTS = math.floor(v + 0.5) end,
+        function(v) return tostring(math.floor(v + 0.5)) end)
+      makeToggleW(sf, 3, "Unter dem Seal halten", function() return g.SB_SEALFARM_UNDER == true end,
+        function() g.SB_SEALFARM_UNDER = not g.SB_SEALFARM_UNDER end)
+      makeToggleW(sf, 4, "Am Ende zurueck", function() return g.SB_SEALFARM_RETURN == true end,
+        function() g.SB_SEALFARM_RETURN = not g.SB_SEALFARM_RETURN end)
+      addInfo(sf, 5, "Teleportiert zum aktiven Seal (auch schon vor dem Oeffnen). Clash: attunen + Boegen treffen. Blood: NPC-Wellen killen. Crown: in Reichweite am Leben bleiben. Tiefe, Delay, Terrain-Schacht und Wand-Reset kommen aus den Autofarm-Einstellungen. Startet nie automatisch.", 88)
+    end)
+  addAction(farm, function()
+      return "Seal: " .. tostring(g.SB_SEALFARM_STATUS or "-") .. "  | Kills " .. tostring(g.SB_SEALFARM_KILLS or 0)
+    end, function() end)
   addModule(farm, "KD-Farm",
     function() return g.SB_KD end,
     function(v) g.SB_KD = v; if v then g.SB_KD_COUNT = 0; startKD() end end,
@@ -2825,6 +3032,7 @@ local function mountGui()
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
     { "KD-Farm",     function() return g.SB_KD end },
+    { "Seal-Farm",   function() return g.SB_SEALFARM end },
   }
   local function rebuildArray()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
