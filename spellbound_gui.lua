@@ -4161,15 +4161,15 @@ local function mountGui()
     function() return g.SB_STREAMPROOF == true end,
     function(v) setStreamproof(v) end)
 
-  -- === ArrayList (oben rechts, immer sichtbar) ===
+  -- === ArrayList (unten rechts, immer sichtbar, waechst nach oben) ===
   local arrayHolder = Instance.new("Frame")
-  local AL_INSET = 52
-  pcall(function() AL_INSET = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
-  arrayHolder.AnchorPoint = Vector2.new(1, 0); arrayHolder.Position = UDim2.new(1, -6, 0, AL_INSET)
+  local AL_BOTTOM = 12
+  arrayHolder.AnchorPoint = Vector2.new(1, 1); arrayHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM)
   arrayHolder.Size = UDim2.fromOffset(0, 0); arrayHolder.AutomaticSize = Enum.AutomaticSize.XY
   arrayHolder.BackgroundTransparency = 1; arrayHolder.Parent = gui
   local al = Instance.new("UIListLayout", arrayHolder); al.SortOrder = Enum.SortOrder.LayoutOrder
   al.HorizontalAlignment = Enum.HorizontalAlignment.Right; al.Padding = UDim.new(0, 2)
+  al.VerticalAlignment = Enum.VerticalAlignment.Bottom
   local ACTIVE = {
     { "Silent-Aim",  function() return g.SB_AIM end },
     { "Auto-Shield", function() return g.SB_SHIELD end },
@@ -4185,13 +4185,14 @@ local function mountGui()
     { "KD-Farm",     function() return g.SB_KD end },
     { "Seal-Farm",   function() return g.SB_SEALFARM end },
   }
-  -- Geblendeten-Liste direkt unter der ArrayList (nur bei aktivem See-Obscuro)
+  -- Geblendeten-Liste direkt ueber der ArrayList (nur bei aktivem See-Obscuro)
   local obscHolder = Instance.new("Frame")
-  obscHolder.AnchorPoint = Vector2.new(1, 0); obscHolder.Position = UDim2.new(1, -6, 0, AL_INSET + 150)
+  obscHolder.AnchorPoint = Vector2.new(1, 1); obscHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM)
   obscHolder.Size = UDim2.fromOffset(0, 0); obscHolder.AutomaticSize = Enum.AutomaticSize.XY
   obscHolder.BackgroundTransparency = 1; obscHolder.Parent = gui
   local ol = Instance.new("UIListLayout", obscHolder); ol.SortOrder = Enum.SortOrder.LayoutOrder
   ol.HorizontalAlignment = Enum.HorizontalAlignment.Right; ol.Padding = UDim.new(0, 2)
+  ol.VerticalAlignment = Enum.VerticalAlignment.Bottom
   local function rebuildObscuro()
     for _, c in ipairs(obscHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
     if not g.SB_OBSC then return end
@@ -4212,7 +4213,7 @@ local function mountGui()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
     local on = {}
     for _, m in ipairs(ACTIVE) do if m[2]() then on[#on + 1] = m[1] end end
-    table.sort(on, function(a, b) return #a > #b end)
+    table.sort(on, function(a, b) return #a < #b end)   -- unten verankert: laengster Eintrag ganz unten
     for idx, nm in ipairs(on) do
       local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
       t.Size = UDim2.fromOffset(0, 24); t.LayoutOrder = idx
@@ -4225,6 +4226,9 @@ local function mountGui()
       local b = Instance.new("Frame"); b.Size = UDim2.new(0, 3, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
       b.BorderSizePixel = 0; b.BackgroundColor3 = ACCENT; b.Parent = t
     end
+    -- Geblendeten-Liste sitzt oberhalb der ArrayList
+    local h = (#on > 0) and (#on * 26) or 0
+    obscHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM - h - (h > 0 and 8 or 0))
   end
 
   -- Refresh-Loop: Modul-Farben + ArrayList (Toggles via Hotkey/extern spiegeln)
@@ -4271,7 +4275,6 @@ local function mountGui()
     pcall(function() ins = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
     if wmBox.Position.Y.Offset ~= ins then
       wmBox.Position = UDim2.fromOffset(10, ins)
-      arrayHolder.Position = UDim2.new(1, -6, 0, ins)
     end
   end
 
