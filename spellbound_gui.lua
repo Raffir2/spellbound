@@ -19,7 +19,8 @@
 --       genau EINEN Spell nach oben, dann weiter zum naechsten. HRP wird dabei verankert.
 --   KD-FARM (Farm-Panel): killt dich per resetEvent im Dauertakt (~3.9s pro Tod), haelt die K/D unten.
 -- BEDIENUNG: ClickGUI im Future-Style — RechtsShift ODER B blendet das Overlay ein/aus.
---   Module per Klick togglen, Rechtsklick oeffnet die Settings. F/H-Hotkeys entfernt;
+--   Module per Klick togglen, Rechtsklick oeffnet die Settings.
+--   ALLE Hotkeys sind frei belegbar: Client-Panel -> Hotkeys (wird in der Config gespeichert). F/H-Hotkeys entfernt;
 --   P=Clash, C=Dodge, T=Apparate, G=Appa-laden, E=Snipe bleiben als Aktions-Hotkeys.
 --   Autofarm und KD-Farm haben BEWUSST keinen Hotkey - nur ueber das Farm-Panel schaltbar.
 -- Standalone, per Autoexec ladbar. Cooldown wird durchgehend ueber casts=0 umgangen.
@@ -2224,6 +2225,33 @@ local function startKD()
   end)
 end
 
+--========================= Hotkeys: alle frei belegbar =========================--
+-- Jede Aktion hat eine id, einen Klartextnamen und eine Default-Taste. Belegt wird der
+-- KeyCode.Name als String (z.B. "E", "RightShift", "PageDown") -> JSON-tauglich, also mit
+-- der Config gespeichert. Neubelegen: im Client-Panel auf die Zeile klicken und die neue
+-- Taste druecken (Escape bricht ab, Backspace loescht die Belegung).
+local KEY_ACTIONS = {
+  { id = "gui",         label = "ClickGUI",      def = "B" },
+  { id = "gui2",        label = "ClickGUI alt.", def = "RightShift" },
+  { id = "dodge",       label = "Auto-Dodge",    def = "C" },
+  { id = "clash",       label = "Auto-Clash",    def = "P" },
+  { id = "appa",        label = "Apparate",      def = "T" },
+  { id = "appaLoad",    label = "Appa laden",    def = "G" },
+  { id = "snipe",       label = "Snipe",         def = "E" },
+  { id = "combo",       label = "Combo",         def = "M" },
+  { id = "farm",        label = "Autofarm",      def = "K" },
+  { id = "streamproof", label = "Streamproof",   def = "PageDown" },
+}
+if type(g.SB_KEYS) ~= "table" then g.SB_KEYS = {} end
+for _, a in ipairs(KEY_ACTIONS) do
+  if type(g.SB_KEYS[a.id]) ~= "string" then g.SB_KEYS[a.id] = a.def end
+end
+g.SB_KEYBIND_WAIT = nil          -- id, deren Taste gerade neu eingelesen wird
+local function keyName(id)
+  local v = g.SB_KEYS[id]
+  return (type(v) == "string" and v ~= "") and v or "-"
+end
+
 --========================= Config: speichern + automatisch laden =========================--
 -- getgenv() ist nach einem Rejoin leer, deshalb liegen die Einstellungen als JSON im
 -- Executor-Workspace (mehrere Slots unter spellbound_configs/). Beim Start wird der zuletzt
@@ -2249,10 +2277,11 @@ local CFG_KEYS = {
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
+  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
   "SB_CFG_AUTOSAVE", "SB_CFG_AUTOLOAD", "SB_CFG_MODULES", "SB_CFG_HOT",
 }
-local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP" }
+local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
 local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
@@ -2306,6 +2335,10 @@ local function cfgApplySettings(d)
     end
   end
   if type(g.SB_SAFE_ROT) ~= "table" or #g.SB_SAFE_ROT ~= 4 then g.SB_SAFE_ROT = DEFAULT_ROT end
+  if type(g.SB_KEYS) ~= "table" then g.SB_KEYS = {} end
+  for _, a in ipairs(KEY_ACTIONS) do                   -- fehlende Belegung -> Default
+    if type(g.SB_KEYS[a.id]) ~= "string" then g.SB_KEYS[a.id] = a.def end
+  end
   return true
 end
 -- Modulzustaende wiederherstellen; die Starter muessen mitlaufen, sonst steht der Toggle
@@ -3049,7 +3082,7 @@ local function mountGui()
       rb.Text = "zurueck auf A"; rb.Parent = sf; corner(rb, 4)
       rb.MouseButton1Click:Connect(function() g.SB_SHOT_IDX = 1 end)
     end)
-  addAction(troll, function() return "Snipe [E] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
+  addAction(troll, function() return "Snipe [" .. keyName("snipe") .. "] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
     function() task.spawn(doSnipe) end,
     function(sf)
       makeSliderW(sf, 1, "Tiefe", 5, 60, function() return tonumber(g.SB_SNIPE_DEPTH) or 15 end,
@@ -3072,7 +3105,7 @@ local function mountGui()
       end
     end)
 
-  addAction(troll, function() return "Combo [M] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
+  addAction(troll, function() return "Combo [" .. keyName("combo") .. "] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
     function() task.spawn(doLockCombo) end,
     function(sf)
       makeDropdownW(sf, 1, function() return "Halte-Spell: " .. tostring(g.SB_LOCK_SPELL) end,
@@ -3246,6 +3279,49 @@ local function mountGui()
   lgh.TextXAlignment = Enum.TextXAlignment.Left
   lgh.Text = "0% = voller Cheat. Bei X% failt jede Aktion (Aim/Dodge/Shield/Clash/Cast) mit X% Wahrscheinlichkeit."
   lgh.Parent = cfg.body
+  addAction(cfg, function() return "Hotkeys" end, function() end,
+    function(sf)
+      local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 0
+      hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
+      hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
+      hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Parent = sf
+      hint.Text = "Zeile anklicken, dann neue Taste druecken. Escape = abbrechen, Backspace = keine Taste."
+      for idx, a in ipairs(KEY_ACTIONS) do
+        local row = Instance.new("TextButton")
+        row.Size = UDim2.new(1, -12, 0, 20); row.LayoutOrder = idx; row.AutoButtonColor = false
+        row.BackgroundColor3 = Color3.fromRGB(34, 30, 50); row.BorderSizePixel = 0
+        row.Font = Enum.Font.Gotham; row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left
+        row.TextColor3 = Color3.fromRGB(215, 210, 235); row.Parent = sf; corner(row, 4)
+        local val = Instance.new("TextLabel"); val.Size = UDim2.fromOffset(90, 20)
+        val.Position = UDim2.new(1, -92, 0, 0); val.BackgroundTransparency = 1
+        val.Font = Enum.Font.GothamBold; val.TextSize = 12; val.TextXAlignment = Enum.TextXAlignment.Right
+        val.TextColor3 = ACCENT; val.Parent = row
+        row.Text = "  " .. a.label
+        local function paint()
+          if not val.Parent then return end
+          if g.SB_KEYBIND_WAIT == a.id then
+            val.Text = "[Taste druecken]"; val.TextColor3 = Color3.fromRGB(255, 200, 90)
+          else
+            val.Text = keyName(a.id); val.TextColor3 = ACCENT
+          end
+        end
+        paint(); moduleRefs[#moduleRefs + 1] = paint
+        row.MouseButton1Click:Connect(function()
+          g.SB_KEYBIND_WAIT = (g.SB_KEYBIND_WAIT == a.id) and nil or a.id
+          paint()
+        end)
+      end
+      local rb = Instance.new("TextButton"); rb.Size = UDim2.new(1, -12, 0, 20)
+      rb.LayoutOrder = #KEY_ACTIONS + 1; rb.BackgroundColor3 = Color3.fromRGB(60, 30, 40)
+      rb.BorderSizePixel = 0; rb.Font = Enum.Font.Gotham; rb.TextSize = 12
+      rb.TextColor3 = Color3.fromRGB(235, 210, 215); rb.Text = "Standard wiederherstellen"
+      rb.Parent = sf; corner(rb, 4)
+      rb.MouseButton1Click:Connect(function()
+        for _, a in ipairs(KEY_ACTIONS) do g.SB_KEYS[a.id] = a.def end
+        g.SB_KEYBIND_WAIT = nil
+      end)
+    end)
+
   addAction(cfg, function()
       return "Config: " .. tostring(g.SB_CFG_NAME) .. (g.SB_CFG_SAVED and ("  " .. g.SB_CFG_SAVED) or "")
     end,
@@ -3356,24 +3432,45 @@ local function mountGui()
     end
   end
 
-  -- RechtsShift ODER B = ClickGUI toggle; C/P/T/G Aktions-Hotkeys (F/H entfernt)
+  -- Alle Hotkeys kommen aus g.SB_KEYS (Client-Panel -> "Hotkeys"), nichts ist fest verdrahtet.
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
-    if i.KeyCode == Enum.KeyCode.PageDown then setStreamproof(not g.SB_STREAMPROOF); return end  -- Bild-Ab: Streamproof
-    if i.KeyCode == Enum.KeyCode.RightShift then setOpen(not guiOpen); return end
-    if gp or UIS:GetFocusedTextBox() then return end       -- im Chat/TextBox: keine Hotkeys (auch kein B)
-    if i.KeyCode == Enum.KeyCode.B then setOpen(not guiOpen); return end
-    if i.KeyCode == Enum.KeyCode.C then
+    if i.UserInputType ~= Enum.UserInputType.Keyboard then return end
+    local kn = i.KeyCode.Name
+    -- Neubelegung laeuft: die naechste Taste wird eingelesen statt ausgefuehrt
+    local waiting = g.SB_KEYBIND_WAIT
+    if waiting then
+      g.SB_KEYBIND_WAIT = nil
+      if kn == "Escape" then                       -- abbrechen
+      elseif kn == "Backspace" or kn == "Delete" then
+        g.SB_KEYS[waiting] = ""                    -- Aktion ohne Taste
+      else
+        for id, v in pairs(g.SB_KEYS) do           -- Taste war woanders belegt -> dort loesen
+          if v == kn and id ~= waiting then g.SB_KEYS[id] = "" end
+        end
+        g.SB_KEYS[waiting] = kn
+      end
+      return
+    end
+    local K = g.SB_KEYS
+    if kn ~= "" and kn == K.streamproof then setStreamproof(not g.SB_STREAMPROOF); return end
+    if kn ~= "" and kn == K.gui2 then setOpen(not guiOpen); return end
+    if gp or UIS:GetFocusedTextBox() then return end       -- im Chat/TextBox: keine Hotkeys
+    if kn == "" then return end
+    if kn == K.gui then setOpen(not guiOpen)
+    elseif kn == K.dodge then
       g.SB_DODGE = not g.SB_DODGE; if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
-    elseif i.KeyCode == Enum.KeyCode.P then
+    elseif kn == K.clash then
       g.SB_CLASH = not g.SB_CLASH; if g.SB_CLASH then startClashAuto() end
-    elseif i.KeyCode == Enum.KeyCode.T then
+    elseif kn == K.appa then
       apparateTo(g.SB_APPA_TARGET)
-    elseif i.KeyCode == Enum.KeyCode.G then
+    elseif kn == K.appaLoad then
       g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
-    elseif i.KeyCode == Enum.KeyCode.E then
+    elseif kn == K.snipe then
       doSnipe()                                   -- 1 Ziel: runter, Spell, zurueck
-    elseif i.KeyCode == Enum.KeyCode.M then
+    elseif kn == K.combo then
       doLockCombo()                               -- runter, festnageln, zurueck, normal schiessen
+    elseif kn == K.farm then
+      g.SB_FARM = not g.SB_FARM; if g.SB_FARM then startFarm() end
     end
   end))
 
