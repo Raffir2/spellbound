@@ -261,23 +261,46 @@ local function isMine(f)
   end
   return false
 end
+-- Tool-Upvalue einer WandClient-Closure (jede Wand hat ihren eigenen WandClient)
+local function toolOf(f)
+  local ok, ups = pcall(debug.getupvalues, f); if not ok then return nil end
+  for _, v in pairs(ups) do
+    if typeof(v) == "Instance" and v:IsA("Tool") then return v end
+  end
+end
+-- Mehrere Waende (z.B. Silver Wand in der Hand + alte Wand im Backpack) haben je eigene Closures.
+-- Frueher gewann die zuletzt gefundene -> oft die Backpack-Wand (equipped=false) -> nie Refs.
+-- Jetzt pro Tool gruppieren und das Set der Wand IN DER HAND liefern.
 local function acquire()
-  local setLoadedSpell, fireSpell, state
+  local byTool = {}
   for _, f in ipairs(getgc(true)) do
     if type(f) == "function" then
       local ok, info = pcall(debug.getinfo, f)
-      if ok and info and type(info.source) == "string" and info.source:find("WandClient") then
-        if hasConsts(f, {"canLoadSpell","elderOnly","list"}) and isMine(f) then
-          setLoadedSpell = f
-          for _, v in pairs(debug.getupvalues(f)) do
-            if type(v) == "table" and rawget(v,"casts") ~= nil and (rawget(v,"loadedSpell") ~= nil or rawget(v,"equipped") ~= nil) then state = v end
+      if ok and info and type(info.source) == "string" and info.source:find("WandClient") and isMine(f) then
+        local tool = toolOf(f)
+        if tool then
+          local e = byTool[tool] or {}; byTool[tool] = e
+          if hasConsts(f, {"canLoadSpell","elderOnly","list"}) then
+            e.set = f
+            for _, v in pairs(debug.getupvalues(f)) do
+              if type(v) == "table" and rawget(v,"casts") ~= nil then e.state = v end
+            end
           end
+          if hasConsts(f, {"isClashing","lastCastTime"}) then e.fire = f end
         end
-        if hasConsts(f, {"isClashing","lastCastTime"}) and isMine(f) then fireSpell = f end
       end
     end
   end
-  return setLoadedSpell, state, fireSpell
+  local char = lp.Character
+  local best
+  for tool, e in pairs(byTool) do
+    if e.set and e.state and e.fire then
+      local inHand = char and tool:IsDescendantOf(char)
+      if inHand and e.state.equipped then return e.set, e.state, e.fire end
+      if not best or inHand then best = e end
+    end
+  end
+  if best then return best.set, best.state, best.fire end
 end
 
 --===== server-akzeptierter Cast (wie spellbound_spam: load->fire+localFire) =====--
@@ -418,8 +441,9 @@ local function castCurrent()
     castApparToPos(realMouseHit())                 -- echte Maus, kein Silent-Aim
     g.SB_APPA_PENDING = false; g.SB_LAST_CAST = os.clock(); return
   end
+  if g.SB_ULTRA then return end                    -- Ultra Legit: nur der native Klick-Cast des Spiels
   if not g.SB_SAFE then return end
-  fireSafeSlot(g.SB_ULTRA or g.SB_PRELOADED ~= nil)
+  fireSafeSlot(g.SB_PRELOADED ~= nil)
 end
 
 local function startSelector()
@@ -440,7 +464,7 @@ local function startSelector()
   g.SB_CURSE_LOOP = true
   task.spawn(function()
     local nextAcquire = 0
-    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM do
+    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM or g.SB_ULTRA do
       pcall(function()
         if not g.SB_MOUSE then
           local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
@@ -779,28 +803,62 @@ end
 
 
 --========================= Ultra Legit =========================--
--- Sieht fuer Zuschauer/Aufnahmen aus wie normales Spielen:
---   1. Fake-Zeiger: das Spiel blendet den echten Mauszeiger schon aus (MouseIconEnabled=false)
---      und zeichnet PriorityUserInterface.Mouse an die echte Mausposition. Im Ultra-Modus wird
---      dieser Cursor jedes Frame auf eine GEGLAETTETE Position gesetzt: ohne Ziel folgt sie der
---      echten Maus, mit Silent-Aim-Ziel gleitet sie zum Zielpunkt statt zu springen.
---      PlayerMouse berechnet Hit/Target/Origin aus Position -> rawset(Position) laesst den Schuss
---      genau dorthin gehen, wo der Fake-Zeiger steht.
---   2. Spell-Auswahl ueber das echte Spell-Rad: R antippen (oeffnet das Rad ueber den Handler
---      des Spiels), den Slot mit dem naechsten Rotations-Spell hovern (Vorschau + Sound) und
---      anklicken -> useBind -> bindClicked -> LOAD_SPELL, das Spiel schliesst das Rad selbst.
---      Die Richtungsauswahl des Spiels greift nur bei GEHALTENEM R und stoert daher nicht.
---   3. Gefeuert wird nur, wenn der Rad-Spell wirklich geladen ist; die Rotation rueckt nur nach
---      einem echten Schuss weiter. Kein unsichtbares Vorladen.
+-- Sieht fuer Zuschauer und Aufnahmen (Medal) aus wie normales Spielen:
+--   * Gecastet wird NUR nativ vom Spiel (dein Klick), ohne Cooldown-Trick. Das Script faehrt
+--     nur Zeiger und Spell-Auswahl.
+--   * Nachladen, sobald der geladene Spell verbraucht ist: WandClient.useSpell zaehlt casts
+--     hoch und ruft bei maxCasts (x2/x3 je nach Stab) setLoadedSpell(nil) auf. Damit laedt
+--     das Script bei einem 2-Cast-Stab automatisch nach jedem 2. Schuss nach.
+--   * Rotation ueber alle Rad-Slots: ab dem aktuellen Slot der erste Spell, der NICHT auf
+--     Lade-Abklingzeit ist. Die Abklingzeit rechnet das Rad beim Event
+--     localSpellUsage "FIRE" aus (loadCooldown, sonst cooldownTime*6, +2 hostile, +5
+--     unique+casting_storm) - hier mit derselben Formel mitgerechnet.
+--   * Spell-Rad in ~50ms: R antippen (bzw. openWheel ueber das Modul des Spiels, wenn Roblox
+--     nicht im Vordergrund ist), 1 Frame, Slot hovern, 1 Frame, Klick -> useBind -> LOAD_SPELL.
+--   * Fake-Zeiger ohne Flackern: der Spiel-Cursor (PriorityUserInterface.Mouse) wird
+--     ausgeblendet, eine 1:1-Kopie in einer eigenen GUI darueber uebernimmt jedes Frame Farbe,
+--     Hitmarker und Sichtbarkeit vom Original und sitzt auf der geglaetteten Position. Ohne
+--     Ziel folgt sie der echten Maus, mit Silent-Aim-Ziel gleitet sie dorthin. PlayerMouse
+--     berechnet Hit aus Position -> der native Schuss geht dahin, wo der Zeiger steht.
 g.SB_ULTRA_SMOOTH = tonumber(g.SB_ULTRA_SMOOTH) or 10     -- Glaettung (hoeher = schneller am Ziel)
-g.SB_ULTRA_WHEEL  = tonumber(g.SB_ULTRA_WHEEL)  or 0.25   -- Reaktionszeit nach dem Schuss bis R
-g.SB_ULTRA_HOVER  = tonumber(g.SB_ULTRA_HOVER)  or 0.14   -- wie lange der Slot gehovert wird
+g.SB_ULTRA_WHEEL  = tonumber(g.SB_ULTRA_WHEEL)  or 0.06   -- Pause nach dem Verbrauch bis zum Rad
+g.SB_ULTRA_HOVER  = math.min(tonumber(g.SB_ULTRA_HOVER) or 0.016, 0.05)  -- Hover-Dauer auf dem Slot (max 50ms; alte 0.14 aus v1 kappen)
+g.SB_ULTRA_CD     = g.SB_ULTRA_CD or {}                    -- [spell] = os.clock()-Ende der Lade-Abklingzeit
 
-local function wheelSlotFor(spell)
+local function spellLoadCooldown(spell)
+  local d = okSp and spellsMod and spellsMod.list and spellsMod.list[spell]
+  if type(d) ~= "table" then return 0 end
+  local cd = d.loadCooldown
+  if not cd then
+    cd = (d.cooldownTime or 1) * 6
+    if d.hostile == true then cd = cd + 2 end
+    if d.unique == true and d.effects and d.effects.casting_storm == true then cd = cd + 5 end
+  end
+  return cd
+end
+
+-- Native Casts mithoeren (Quelle der Rad-Abklingzeiten)
+if not g.SB_ULTRA_USAGE_HOOKED then
+  pcall(function()
+    local usage = require(RS.import)("bridges/localSpellUsage")
+    usage.Event:Connect(function(action, spell)
+      if action ~= "FIRE" or type(spell) ~= "string" then return end
+      g.SB_ULTRA_CD[spell] = os.clock() + spellLoadCooldown(spell)
+      g.SB_ULTRA_LASTFIRE = os.clock()
+    end)
+    g.SB_ULTRA_USAGE_HOOKED = true
+  end)
+end
+
+local function wheelBinds()
   local pg = lp:FindFirstChild("PlayerGui")
   local sw = pg and pg:FindFirstChild("SpellWheel")
   local cont = sw and sw:FindFirstChild("Container")
-  local binds = cont and cont:FindFirstChild("Binds")
+  return cont and cont:FindFirstChild("Binds"), cont
+end
+
+local function wheelSlotFor(spell)
+  local binds = wheelBinds()
   if not binds then return nil end
   for _, slot in ipairs(binds:GetChildren()) do
     if slot:GetAttribute("incantation") == spell then return slot end
@@ -808,27 +866,22 @@ local function wheelSlotFor(spell)
   return nil
 end
 
--- Spell ueber das echte Rad auswaehlen. true, wenn der Klick abgesetzt wurde.
+-- Spell ueber das echte Rad auswaehlen, ~50ms. true, wenn der Klick abgesetzt wurde.
 local function wheelSelect(spell)
   local slot = wheelSlotFor(spell)
   local input = slot and slot:FindFirstChild("_Input")
   if not input then return false, "nicht im Rad" end
   if UIS:GetFocusedTextBox() then return false, "Textfeld aktiv" end
   if lp:GetAttribute("Client_IsClashing") == true then return false, "im Clash" end
-  -- R antippen oeffnet das Rad ueber den Handler des Spiels. keypress geht aber an das AKTIVE
-  -- Fenster: ist Roblox nicht im Vordergrund (isrbxactive() == false), kommt die Taste nie an
-  -- (gemessen: Spell geladen, Rad blieb unsichtbar). Dann das Rad direkt ueber das Modul des
-  -- Spiels oeffnen - derselbe Aufruf, den der R-Handler intern macht (refitGui + openWheel).
-  local cont = slot.Parent and slot.Parent.Parent
+  local _, cont = wheelBinds()
   local active = true
   pcall(function() if isrbxactive then active = isrbxactive() end end)
   if active then
-    pcall(function() keypress(0x52) end)
-    task.wait(0.03)
-    pcall(function() keyrelease(0x52) end)
-    task.wait(0.1)
+    pcall(function() keypress(0x52); keyrelease(0x52) end)   -- R antippen: Rad ueber den Spiel-Handler
+    RunService.Heartbeat:Wait()
   end
-  if not (cont and cont:IsA("GuiObject") and cont.Visible) then
+  if not (cont and cont.Visible) then
+    -- keypress geht ans aktive Fenster; ohne Fokus das Rad ueber das Modul des Spiels oeffnen
     pcall(function()
       local sw = lp.PlayerScripts:FindFirstChild("spellWheel", true)
       local wr = sw and require(sw:FindFirstChild("wheelRenderer"))
@@ -838,20 +891,79 @@ local function wheelSelect(spell)
       end
     end)
   end
-  task.wait(0.06 + math.random() * 0.06)
   local okE, enters = pcall(getconnections, input.MouseEnter)
   for _, c in ipairs(okE and enters or {}) do pcall(function() c:Fire() end) end
-  task.wait(math.max(tonumber(g.SB_ULTRA_HOVER) or 0.14, 0.03) * (0.85 + math.random() * 0.3))
+  local hover = math.min(tonumber(g.SB_ULTRA_HOVER) or 0.016, 0.05)   -- ganzer Rad-Vorgang bleibt ~50ms
+  if hover > 0.02 then task.wait(hover) else RunService.Heartbeat:Wait() end
   local okC, clicks = pcall(getconnections, input.MouseButton1Click)
   for _, c in ipairs(okC and clicks or {}) do pcall(function() c:Fire() end) end
-  -- blieb das Rad offen (z.B. Spell auf Abklingzeit), wieder schliessen
-  task.delay(0.35, function()
-    local cont = slot.Parent and slot.Parent.Parent
-    if cont and cont:IsA("GuiObject") and cont.Visible then
+  -- blieb das Rad offen (Abklingzeit/Mana), wieder schliessen
+  task.delay(0.25, function()
+    if cont and cont.Visible then
       pcall(function() require(RS.import)("bridges/localSpellWheel"):Fire("CLOSE_WHEEL") end)
     end
   end)
   return true
+end
+
+-- naechster Rotations-Spell, der im Rad liegt und nicht auf Abklingzeit ist
+local function ultraPickSpell()
+  local ROT = g.SB_SAFE_ROT or {}
+  local n = #ROT
+  if n == 0 then return nil end
+  local start = tonumber(g.SB_ROT_IDX) or 1
+  local now = os.clock()
+  for k = 0, n - 1 do
+    local i = ((start - 1 + k) % n) + 1
+    local sp = ROT[i]
+    if sp and (g.SB_ULTRA_CD[sp] or 0) <= now and wheelSlotFor(sp) then
+      return sp, i
+    end
+  end
+  return nil
+end
+
+local fakeGui, fakeCur, fakePairs
+local function destroyFakeCursor()
+  if fakeGui then pcall(function() fakeGui:Destroy() end) end
+  fakeGui, fakeCur, fakePairs = nil, nil, nil
+end
+
+-- 1:1-Kopie des Spiel-Cursors in eigener GUI ueber dem Original
+local function ensureFakeCursor()
+  local pg = lp:FindFirstChild("PlayerGui")
+  local pui = pg and pg:FindFirstChild("PriorityUserInterface")
+  local orig = pui and pui:FindFirstChild("Mouse")
+  if not orig then return nil end
+  if fakeGui and fakeGui.Parent and fakeCur and fakeCur.Parent then return orig end
+  destroyFakeCursor()
+  fakeGui = Instance.new("ScreenGui")
+  fakeGui.Name = "SB_FakeCursor"; fakeGui.ResetOnSpawn = false; fakeGui.IgnoreGuiInset = true
+  fakeGui.DisplayOrder = 999999999; fakeGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+  fakeGui.Parent = pg
+  fakeCur = orig:Clone()
+  fakeCur.Visible = true
+  fakeCur.Parent = fakeGui
+  -- Original und Kopie paarweise (Clone behaelt die Descendant-Reihenfolge)
+  local od, cd = orig:GetDescendants(), fakeCur:GetDescendants()
+  fakePairs = {}
+  for i = 1, math.min(#od, #cd) do fakePairs[#fakePairs + 1] = { od[i], cd[i] } end
+  return orig
+end
+
+local function mirrorCursor(orig)
+  for _, pr in ipairs(fakePairs or {}) do
+    local o, c = pr[1], pr[2]
+    pcall(function()
+      if o:IsA("GuiObject") then
+        c.Visible = o.Visible; c.Size = o.Size; c.Rotation = o.Rotation
+        c.BackgroundTransparency = o.BackgroundTransparency
+        if o:IsA("ImageLabel") then c.ImageColor3 = o.ImageColor3; c.ImageTransparency = o.ImageTransparency end
+      elseif o:IsA("UIStroke") then
+        c.Transparency = o.Transparency; c.Color = o.Color; c.Thickness = o.Thickness
+      end
+    end)
+  end
 end
 
 local function stopUltraCursor()
@@ -859,16 +971,20 @@ local function stopUltraCursor()
     local pmS = require(RS.shared.modules.PlayerMouse):GetMouse()
     rawset(pmS, "Position", nil)
   end)
+  pcall(function()
+    local orig = lp.PlayerGui.PriorityUserInterface:FindFirstChild("Mouse")
+    if orig then orig.Visible = not UIS.MouseIconEnabled end  -- Spiel-Cursor wie vom Spiel gewollt zurueck
+  end)
+  destroyFakeCursor()
 end
 
 local function startUltra()
   if g.SB_ULTRA_LOOP then return end
   g.SB_ULTRA_LOOP = true
-  startSelector()
+  startSelector()                                  -- haelt g.SB_REFS (loadedSpell) aktuell
   local okM, pmMod = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
   local mouseObj = okM and pmMod and pmMod:GetMouse() or nil
   local fake = UIS:GetMouseLocation()
-  -- Fake-Zeiger: nach dem Cursor-Update des Spiels (spaeter verbunden -> laeuft danach)
   local cursorConn = RunService.RenderStepped:Connect(function(dt)
     if not g.SB_ULTRA then return end
     pcall(function()
@@ -883,31 +999,39 @@ local function startUltra()
       local k = 1 - math.exp(-(tonumber(g.SB_ULTRA_SMOOTH) or 10) * math.min(dt, 0.1))
       fake = fake + (desired - fake) * k
       if mouseObj then rawset(mouseObj, "Position", fake); rawset(mouseObj, "Hit", nil) end
-      local pg = lp:FindFirstChild("PlayerGui")
-      local pui = pg and pg:FindFirstChild("PriorityUserInterface")
-      local cur = pui and pui:FindFirstChild("Mouse")
-      if cur then cur.Position = UDim2.fromOffset(fake.X - 11, fake.Y - 8) end
+      local orig = ensureFakeCursor()
+      if orig and fakeCur then
+        local want = not UIS.MouseIconEnabled      -- das Spiel zeigt seinen Cursor genau dann
+        mirrorCursor(orig)
+        orig.Visible = false
+        fakeCur.Visible = want
+        fakeCur.Position = UDim2.fromOffset(fake.X - 11, fake.Y - 8)
+      end
     end)
   end)
   table.insert(g.SB_CONNS, cursorConn)
-  -- Spell-Auswahl: fehlt der naechste Rotations-Spell, nach der Reaktionszeit ueber das Rad holen
   task.spawn(function()
-    local nextTry = 0
+    local busyUntil = 0
     while g.SB_ULTRA do
       pcall(function()
         local refs = g.SB_REFS
-        if not (g.SB_SAFE and refs and refs.state and refs.state.equipped) then return end
-        if g.SB_CASTING or g.SB_APPA_PENDING or isStunnedOrBound() then return end
-        local ROT = g.SB_SAFE_ROT
-        local spell = ROT[g.SB_ROT_IDX] or ROT[1]
-        if refs.state.loadedSpell == spell then return end
-        if os.clock() < nextTry then return end
-        if os.clock() - (g.SB_LAST_CAST or 0) < (tonumber(g.SB_ULTRA_WHEEL) or 0.25) then return end
-        nextTry = os.clock() + 1.2                  -- nicht im Kreis klicken, falls es nicht laedt
+        if not (refs and refs.state and refs.state.equipped) then return end
+        if refs.state.loadedSpell ~= nil then busyUntil = 0; return end  -- geladen: Sperre frei, Spell noch nicht verbraucht
+        if g.SB_APPA_PENDING or isStunnedOrBound() then return end
+        if os.clock() < busyUntil then return end
+        if os.clock() - (g.SB_ULTRA_LASTFIRE or 0) < (tonumber(g.SB_ULTRA_WHEEL) or 0.06) then return end
+        local spell, i = ultraPickSpell()
+        if not spell then g.SB_ULTRA_STATUS = "alle Spells auf Abklingzeit"; return end
+        busyUntil = os.clock() + 0.35                -- nicht doppelt ins Rad klicken
         local ok, why = wheelSelect(spell)
-        g.SB_ULTRA_STATUS = ok and ("Rad: " .. tostring(spell)) or ("Rad: " .. tostring(why))
+        if ok then
+          g.SB_ROT_IDX = (i % #g.SB_SAFE_ROT) + 1    -- naechstes Mal ab dem folgenden Slot
+          g.SB_ULTRA_STATUS = "Rad: " .. spell
+        else
+          g.SB_ULTRA_STATUS = "Rad: " .. tostring(why)
+        end
       end)
-      task.wait(0.1)
+      RunService.Heartbeat:Wait()
     end
     stopUltraCursor()
     g.SB_ULTRA_LOOP = false
@@ -3675,13 +3799,13 @@ local function mountGui()
       makeSliderW(sf, 1, "Aim-Glaettung", 2, 30, function() return tonumber(g.SB_ULTRA_SMOOTH) or 10 end,
         function(v) g.SB_ULTRA_SMOOTH = math.floor(v * 10 + 0.5) / 10 end,
         function(v) return string.format("%.1f", v) end)
-      makeSliderW(sf, 2, "Reaktion bis Rad", 0, 1, function() return tonumber(g.SB_ULTRA_WHEEL) or 0.25 end,
+      makeSliderW(sf, 2, "Reaktion bis Rad", 0, 0.5, function() return tonumber(g.SB_ULTRA_WHEEL) or 0.06 end,
         function(v) g.SB_ULTRA_WHEEL = math.floor(v * 100 + 0.5) / 100 end,
         function(v) return string.format("%.2fs", v) end)
-      makeSliderW(sf, 3, "Hover-Dauer", 0.03, 0.4, function() return tonumber(g.SB_ULTRA_HOVER) or 0.14 end,
-        function(v) g.SB_ULTRA_HOVER = math.floor(v * 100 + 0.5) / 100 end,
+      makeSliderW(sf, 3, "Hover-Dauer", 0, 0.05, function() return tonumber(g.SB_ULTRA_HOVER) or 0.016 end,
+        function(v) g.SB_ULTRA_HOVER = math.floor(v * 1000 + 0.5) / 1000 end,
         function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 4, "Braucht Safe-Combat (und Silent-Aim fuer das Zielen). Waehlt jeden Spell sichtbar ueber das Spell-Rad (R, Hover, Klick) und zeigt einen Fake-Zeiger, der weich zum Ziel gleitet - der Schuss geht dorthin, wo der Zeiger steht. Die Rotations-Spells muessen im Rad liegen.", 88)
+      addInfo(sf, 4, "Castet nur nativ (dein Klick). Laedt den naechsten Spell ueber das echte Rad (~50ms), sobald der geladene verbraucht ist, und ueberspringt Spells auf Abklingzeit. Fake-Zeiger gleitet weich zum Silent-Aim-Ziel und ist auf Aufnahmen sichtbar. Rotation = Safe-Combat-Slots, die im Rad liegen.", 88)
     end)
 
   -- === Troll-Panel ===
