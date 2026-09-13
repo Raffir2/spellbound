@@ -1514,14 +1514,50 @@ local function sealUnpin()
   if sealPinConn then pcall(function() sealPinConn:Disconnect() end); sealPinConn = nil end
 end
 
--- Boden an einer Stelle (Raycast von oben, eigener Charakter ausgenommen). Trifft auch
--- Daecher - dort oben zaehlte es beim Test ebenfalls als "In Range".
-local function groundAt(pos)
+local function pointInPart(part, pos)
+  local lpos = part.CFrame:PointToObjectSpace(pos)
+  local h = part.Size * 0.5
+  return math.abs(lpos.X) <= h.X and math.abs(lpos.Y) <= h.Y and math.abs(lpos.Z) <= h.Z
+end
+
+-- Haltepunkt, der garantiert IN einer Zonen-Box des Seals liegt. Die Reichweite kommt aus
+-- den unsichtbaren Part-Kindern des Seal-Ordners. Der Pivot des Ordners taugt NICHT: bei
+-- Hearthside Tavern lag er in keiner der vier Zonen (um 45 Grad gedreht, ~200 Studs
+-- versetzt) -> 10s "Not Nearby". Bevorzugt die Orb-Position (lag bei Hearthside und
+-- Sylvethorne in einer Zone), sonst die Mitte der groessten Zonen-Box.
+local function sealHoldPoint(loc)
+  local zones, best, bestVol = {}, nil, -1
+  for _, c in ipairs(loc:GetChildren()) do
+    if c:IsA("BasePart") then
+      zones[#zones + 1] = c
+      local v = c.Size.X * c.Size.Y * c.Size.Z
+      if v > bestVol then best, bestVol = c, v end
+    end
+  end
+  local act = loc:FindFirstChild("__ActiveSealModel")
+  local orb = act and act:FindFirstChild("OrbCenter", true)
+  local orbPos = orb and ((orb:IsA("BasePart") and orb.Position) or (orb:IsA("Attachment") and orb.WorldPosition))
+  if orbPos then
+    for _, z in ipairs(zones) do
+      if pointInPart(z, orbPos) then return orbPos, z end
+    end
+  end
+  if best then return best.Position, best end
+  return orbPos or loc:GetPivot().Position, nil
+end
+
+-- Boden innerhalb der Zone (Raycast ab Oberkante der Box, eigener Charakter ausgenommen).
+-- Landet der Treffer ausserhalb der Zone (z.B. Dach darueber), bleibt es beim Zonenpunkt.
+local function groundInZone(center, zone)
+  local top = zone and (zone.Position.Y + zone.Size.Y * 0.5) or (center.Y + 150)
   local params = RaycastParams.new()
   params.FilterType = Enum.RaycastFilterType.Exclude
   params.FilterDescendantsInstances = { lp.Character }
-  local hit = workspace:Raycast(pos + Vector3.new(0, 150, 0), Vector3.new(0, -500, 0), params)
-  return hit and hit.Position or pos
+  local from = Vector3.new(center.X, top, center.Z)
+  local hit = workspace:Raycast(from, Vector3.new(0, -(top - center.Y + 300), 0), params)
+  local spot = hit and (hit.Position + Vector3.new(0, 3.5, 0)) or center
+  if zone and not pointInPart(zone, spot) then spot = center end
+  return spot
 end
 
 -- lebende Blood-NPCs des aktiven Seals, naechster zuerst
@@ -1595,10 +1631,10 @@ local function startSealFarm()
         else
           -- am Seal halten: unter dem Zentrum, ausser dieser Seal zaehlt das nicht als Reichweite
           g.SB_FARM_TARGET = nil
-          local center = loc:GetPivot().Position
+          local center, zone = sealHoldPoint(loc)
           local under  = g.SB_SEALFARM_UNDER and surfaceFor ~= st.sealId
           local depth  = tonumber(g.SB_FARM_DEPTH) or 15
-          local spot   = under and (center - Vector3.new(0, depth, 0)) or (groundAt(center) + Vector3.new(0, 3.5, 0))
+          local spot   = under and (center - Vector3.new(0, depth, 0)) or groundInZone(center, zone)
           if sealPin(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
             carveShaft(spot, center)                 -- Schacht nach oben, damit Casts rauskommen
           end
