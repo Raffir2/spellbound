@@ -52,8 +52,9 @@ g.SB_SHOT_IV    = tonumber(g.SB_SHOT_IV)    or 0.02  -- Abstand: 1 Frame, kleins
 g.SB_SHOT_BURST = tonumber(g.SB_SHOT_BURST) or 6     -- Schuesse pro Klick (Rate-Limit!)
 if g.SB_SHOT_REEQUIP == nil then g.SB_SHOT_REEQUIP = true end  -- Stab vor jedem Schuss neu ziehen
 if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells mitnehmen
-g.SB_SNIPE_BUSY = false
-g.SB_LOCK_BUSY  = false                           -- Combo (M) beim Reload nicht haengend                           -- Snipe (M) beim Reload nicht "haengend"
+g.SB_SNIPE_BUSY = false                           -- Snipe beim Reload nicht "haengend"
+g.SB_LOCK_BUSY  = false                           -- Combo beim Reload nicht "haengend"
+g.SB_DEWAND, g.SB_DEWAND_LOOP = false, false      -- De-Wand beim Reload aus
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
@@ -1982,6 +1983,130 @@ local function doLockCombo()
   end)
 end
 
+--=============== DE-WAND: markierte Spieler beim Zuecken des Stabs entwaffnen ===============--
+-- Man hakt in der Liste beliebig viele Spieler an. Eine Schleife beobachtet sie und schlaegt
+-- in dem Moment zu, in dem so einer wieder einen Stab in der Hand hat (z.B. direkt nach dem
+-- Respawn): TP unter das Ziel, expelliarmus nach oben (entwaffnet), sofort zurueck.
+-- WICHTIG: von fremden Spielern sieht der Client nur das, was im Character haengt - der
+-- Rucksack repliziert nicht. "Stab im Inventar" heisst hier also "Stab in der Hand".
+-- Pro Ziel greift eine Sperrzeit, damit nicht mehrfach hintereinander gefeuert wird.
+g.SB_DEWAND_LIST  = type(g.SB_DEWAND_LIST) == "table" and g.SB_DEWAND_LIST or {}  -- [Name]=true
+g.SB_DEWAND_SPELL = g.SB_DEWAND_SPELL or resolveSpell("expelliarmus")
+g.SB_DEWAND_CD    = tonumber(g.SB_DEWAND_CD) or 4      -- Sperrzeit pro Ziel in s
+if g.SB_DEWAND_SAFE == nil then g.SB_DEWAND_SAFE = false end  -- auch in Safe Zones zuschlagen
+g.SB_DEWAND_LAST  = g.SB_DEWAND_LAST or {}             -- [Name] = tick() des letzten Schlags
+
+-- Ein Schlag von unten: TP unter das Ziel, EIN Spell nach oben, zurueck auf den Startpunkt.
+-- Gleiche Mechanik wie die Combo, nur ohne Nachschlag - und mit eigenem Ziel statt Silent-Aim.
+local function strikeFromBelow(pl, root, hum, spell)
+  local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if not (hrp and root and hum) then return false end
+  local home       = hrp.CFrame
+  local carveKey   = nil
+  local holdAnchor = false
+  local hit        = false
+  pcall(function()
+    local depth = tonumber(g.SB_LOCK_DEPTH) or 15
+    local spot  = root.Position - Vector3.new(0, depth, 0)
+    if not farmTeleport(spot) then return end
+    if g.SB_LOCK_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
+      carveKey = carveShaft(spot, root.Position)
+    end
+    task.wait(tonumber(g.SB_LOCK_DELAY) or 0.05)
+    if root.Parent and hum.Health > 0 then hit = farmCast(root, hum, spell) and true or false end
+  end)
+  local function goHome()
+    local ch2  = lp.Character
+    local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+    if not (ch2 and hrp2) then return end
+    pcall(function() ch2:PivotTo(home) end)
+    hrp2.AssemblyLinearVelocity = Vector3.zero
+    hrp2.Anchored = holdAnchor
+    local hum2 = ch2:FindFirstChildOfClass("Humanoid")
+    local cam  = workspace.CurrentCamera
+    if cam and hum2 and cam.CameraSubject ~= hum2 then cam.CameraSubject = hum2 end
+  end
+  holdAnchor = (carveKey ~= nil)
+  goHome()
+  task.spawn(function()
+    for _ = 1, 4 do
+      RunService.Heartbeat:Wait()
+      local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+      if hrp2 then
+        if (hrp2.Position - home.Position).Magnitude > 3 then goHome() end
+        if hrp2.Anchored ~= holdAnchor then hrp2.Anchored = holdAnchor end
+      end
+    end
+  end)
+  if carveKey then
+    local key = carveKey
+    task.spawn(function()
+      task.wait(0.15)
+      pcall(uncarveCells, key)
+      holdAnchor = false
+      local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+      if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
+    end)
+    task.delay(2, function()                        -- Notbremse: nie festkleben
+      holdAnchor = false
+      local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+      if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
+    end)
+  end
+  return hit
+end
+
+local function startDeWand()
+  if g.SB_DEWAND_LOOP then return end
+  g.SB_DEWAND_LOOP = true
+  startSelector()                                   -- haelt g.SB_REFS/Wand-Closures aktuell
+  task.spawn(function()
+    while g.SB_DEWAND do
+      pcall(function()
+        if g.SB_FARM or g.SB_SEALFARM or g.SB_LOCK_BUSY or g.SB_SNIPE_BUSY then return end
+        if isStunnedOrBound() or isRagdolled() then return end
+        local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if not myHRP then return end
+        local watched, armed = 0, 0
+        for name in pairs(g.SB_DEWAND_LIST) do
+          watched = watched + 1
+          local pl = Players:FindFirstChild(name)
+          local ch = pl and pl.Character
+          local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+          local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+          local wand = ch and ch:FindFirstChildWhichIsA("Tool")
+          if pl and root and hum and hum.Health > 0 and wand then
+            armed = armed + 1
+            local safe = (not g.SB_DEWAND_SAFE) and pl:GetAttribute("InSafeZone") == true
+            local cd   = tick() - (tonumber(g.SB_DEWAND_LAST[name]) or 0)
+            if safe then
+              g.SB_DEWAND_STATUS = name .. " haelt den Stab, ist aber in der Safe Zone"
+            elseif cd >= (tonumber(g.SB_DEWAND_CD) or 4) then
+              g.SB_DEWAND_LAST[name] = tick()
+              g.SB_LOCK_BUSY = true                 -- blockt Snipe/Combo waehrenddessen
+              local spell = resolveSpell(g.SB_DEWAND_SPELL or "expelliarmus")
+              local okHit = strikeFromBelow(pl, root, hum, spell)
+              g.SB_LOCK_BUSY = false
+              if okHit then
+                g.SB_DEWAND_COUNT  = (tonumber(g.SB_DEWAND_COUNT) or 0) + 1
+                g.SB_DEWAND_STATUS = name .. " entwaffnet (" .. spell .. ")"
+              else
+                g.SB_DEWAND_STATUS = name .. ": Cast fehlgeschlagen"
+              end
+              return                                -- pro Durchlauf nur ein Ziel
+            end
+          end
+        end
+        g.SB_DEWAND_WATCHED = watched
+        if watched == 0 then g.SB_DEWAND_STATUS = "niemand markiert"
+        elseif armed == 0 then g.SB_DEWAND_STATUS = "warte auf Stab in der Hand (" .. watched .. " markiert)" end
+      end)
+      task.wait(0.25)
+    end
+    g.SB_DEWAND_LOOP = false
+  end)
+end
+
 --========================= SHOTGUN (Troll) =========================--
 -- Feuert NIE von selbst: nur ein echter Linksklick (InputBegan) loest EINEN Burst aus —
 -- genau SB_SHOT_BURST (=6) Spells hintereinander, Takt SB_SHOT_IV (=0.02s = 1 Frame, der
@@ -2278,10 +2403,11 @@ local CFG_KEYS = {
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
   "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
+  "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
   "SB_CFG_AUTOSAVE", "SB_CFG_AUTOLOAD", "SB_CFG_MODULES", "SB_CFG_HOT",
 }
-local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS" }
+local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS", "SB_DEWAND_LIST" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
 local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
@@ -3105,6 +3231,34 @@ local function mountGui()
       end
     end)
 
+  addModule(troll, "De-Wand",
+    function() return g.SB_DEWAND end,
+    function(v) g.SB_DEWAND = v; if v then startDeWand() end end,
+    function(sf)
+      makeDropdownW(sf, 1, function() return "Spell: " .. tostring(g.SB_DEWAND_SPELL) end,
+        getSpellList, function(n) g.SB_DEWAND_SPELL = n end)
+      makeSliderW(sf, 2, "Sperrzeit/Ziel", 0.5, 20, function() return tonumber(g.SB_DEWAND_CD) or 4 end,
+        function(v) g.SB_DEWAND_CD = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1fs", v) end)
+      makeToggleW(sf, 3, "auch in Safe Zone", function() return g.SB_DEWAND_SAFE == true end,
+        function() g.SB_DEWAND_SAFE = not g.SB_DEWAND_SAFE end)
+      local lbl = Instance.new("TextLabel"); lbl.Size = UDim2.new(1, -10, 0, 16); lbl.LayoutOrder = 4
+      lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 11
+      lbl.TextColor3 = TXT_DIM; lbl.TextXAlignment = Enum.TextXAlignment.Left
+      lbl.Text = "  Ziele:"; lbl.Parent = sf
+      makePlayerToggles(sf, 5, function(n) return g.SB_DEWAND_LIST[n] == true end,
+        function(n) if g.SB_DEWAND_LIST[n] then g.SB_DEWAND_LIST[n] = nil else g.SB_DEWAND_LIST[n] = true end end)
+      local st = Instance.new("TextLabel"); st.Size = UDim2.new(1, -10, 0, 42); st.LayoutOrder = 6
+      st.BackgroundTransparency = 1; st.Font = Enum.Font.Gotham; st.TextSize = 11
+      st.TextColor3 = TXT_DIM; st.TextWrapped = true
+      st.TextXAlignment = Enum.TextXAlignment.Left; st.Parent = sf
+      moduleRefs[#moduleRefs + 1] = function()
+        if not st.Parent then return false end
+        st.Text = "  Schlaegt zu, sobald ein markierter Spieler den Stab in der Hand hat. zuletzt: "
+          .. tostring(g.SB_DEWAND_STATUS or "-") .. " (" .. (tonumber(g.SB_DEWAND_COUNT) or 0) .. ")"
+        return true
+      end
+    end)
   addAction(troll, function() return "Combo [" .. keyName("combo") .. "] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
     function() task.spawn(doLockCombo) end,
     function(sf)
@@ -3367,6 +3521,7 @@ local function mountGui()
     { "Safe-Combat", function() return g.SB_SAFE end },
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
+    { "De-Wand",     function() return g.SB_DEWAND end },
     { "KD-Farm",     function() return g.SB_KD end },
     { "Seal-Farm",   function() return g.SB_SEALFARM end },
   }
@@ -3400,6 +3555,7 @@ local function mountGui()
       pcall(rebuildArray)
       -- Watchdog: Shotgun auch starten wenn der Toggle von aussen gesetzt wurde
       if g.SB_SHOT and not g.SB_SHOT_LOOP then pcall(startShotgun) end
+      if g.SB_DEWAND and not g.SB_DEWAND_LOOP then pcall(startDeWand) end
       task.wait(0.2)
     end
   end)
