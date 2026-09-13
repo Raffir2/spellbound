@@ -3453,15 +3453,6 @@ local function mountGui()
   addModule(combat, "Auto-Clash",
     function() return g.SB_CLASH end,
     function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
-  addModule(combat, "Auto-Seal",
-    function() return g.SB_SEAL end,
-    function(v) g.SB_SEAL = v; if v then startSealAuto(); startSealAttune() end end,
-    function(sf)
-      makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
-        function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
-        function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 2, "Clash Seal: castet in Reichweite automatisch auf den Orb (attunen), danach wird jeder Bogen aus dem Seed des Servers nachgerechnet und mittig getroffen (bei Ueberlappung der Bonus). Der normale Auto-Clash greift hier nicht - eigenes Paket, eigene GUI.", 76)
-    end)
   addModule(combat, "Auto-Dodge",
     function() return g.SB_DODGE end,
     function(v) g.SB_DODGE = v; if v then g.SB_DODGE_SKIPACC = 0; hookDodge() end end,
@@ -3629,6 +3620,15 @@ local function mountGui()
       makeToggleW(sf, 16, "Spieler im Clash auslassen", function() return g.SB_FARM_SKIP_CLASH == true end,
         function() g.SB_FARM_SKIP_CLASH = not g.SB_FARM_SKIP_CLASH end)
       addInfo(sf, 17, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
+    end)
+  addModule(farm, "Auto-Seal",
+    function() return g.SB_SEAL end,
+    function(v) g.SB_SEAL = v; if v then startSealAuto(); startSealAttune() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
+        function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      addInfo(sf, 2, "Clash Seal: castet in Reichweite automatisch auf den Orb (attunen). Das Minigame danach laeuft ueber das normale Clash-UI und wird von Auto-Clash gespielt - die Seal-Farm schaltet Auto-Clash selbst mit.", 64)
     end)
   addModule(farm, "Seal-Farm",
     function() return g.SB_SEALFARM end,
