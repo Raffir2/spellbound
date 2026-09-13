@@ -283,7 +283,8 @@ local function acquire()
           if hasConsts(f, {"canLoadSpell","elderOnly","list"}) then
             e.set = f
             for _, v in pairs(debug.getupvalues(f)) do
-              if type(v) == "table" and rawget(v,"casts") ~= nil then e.state = v end
+              -- frisch ausgeruestet ist der State nur {lumosEnabled, equipped} - casts kommt erst beim ersten Load
+              if type(v) == "table" and (rawget(v,"casts") ~= nil or rawget(v,"lumosEnabled") ~= nil) then e.state = v end
             end
           end
           if hasConsts(f, {"isClashing","lastCastTime"}) then e.fire = f end
@@ -822,7 +823,7 @@ end
 --     berechnet Hit aus Position -> der native Schuss geht dahin, wo der Zeiger steht.
 g.SB_ULTRA_SMOOTH = tonumber(g.SB_ULTRA_SMOOTH) or 10     -- Glaettung (hoeher = schneller am Ziel)
 g.SB_ULTRA_WHEEL  = tonumber(g.SB_ULTRA_WHEEL)  or 0.06   -- Pause nach dem Verbrauch bis zum Rad
-g.SB_ULTRA_HOVER  = math.min(tonumber(g.SB_ULTRA_HOVER) or 0.016, 0.05)  -- Hover-Dauer auf dem Slot (max 50ms; alte 0.14 aus v1 kappen)
+g.SB_ULTRA_SEL    = tonumber(g.SB_ULTRA_SEL)    or 0.2    -- Rad-Auswahl gesamt: R bis Klick (+-15% Streuung)
 g.SB_ULTRA_CD     = g.SB_ULTRA_CD or {}                    -- [spell] = os.clock()-Ende der Lade-Abklingzeit
 
 local function spellLoadCooldown(spell)
@@ -874,6 +875,7 @@ local function wheelSelect(spell)
   if UIS:GetFocusedTextBox() then return false, "Textfeld aktiv" end
   if lp:GetAttribute("Client_IsClashing") == true then return false, "im Clash" end
   local _, cont = wheelBinds()
+  local tOpen = os.clock()
   local active = true
   pcall(function() if isrbxactive then active = isrbxactive() end end)
   if active then
@@ -893,12 +895,14 @@ local function wheelSelect(spell)
   end
   local okE, enters = pcall(getconnections, input.MouseEnter)
   for _, c in ipairs(okE and enters or {}) do pcall(function() c:Fire() end) end
-  local hover = math.min(tonumber(g.SB_ULTRA_HOVER) or 0.016, 0.05)   -- ganzer Rad-Vorgang bleibt ~50ms
-  if hover > 0.02 then task.wait(hover) else RunService.Heartbeat:Wait() end
+  -- menschliche Auswahlzeit: vom Oeffnen bis zum Klick insgesamt ~SB_ULTRA_SEL, leicht gestreut
+  local sel = math.clamp(tonumber(g.SB_ULTRA_SEL) or 0.2, 0, 0.6)
+  local rest = sel * (0.85 + math.random() * 0.3) - (os.clock() - tOpen)
+  if rest > 0.02 then task.wait(rest) else RunService.Heartbeat:Wait() end
   local okC, clicks = pcall(getconnections, input.MouseButton1Click)
   for _, c in ipairs(okC and clicks or {}) do pcall(function() c:Fire() end) end
   -- blieb das Rad offen (Abklingzeit/Mana), wieder schliessen
-  task.delay(0.25, function()
+  task.delay(0.3, function()
     if cont and cont.Visible then
       pcall(function() require(RS.import)("bridges/localSpellWheel"):Fire("CLOSE_WHEEL") end)
     end
@@ -1022,7 +1026,7 @@ local function startUltra()
         if os.clock() - (g.SB_ULTRA_LASTFIRE or 0) < (tonumber(g.SB_ULTRA_WHEEL) or 0.06) then return end
         local spell, i = ultraPickSpell()
         if not spell then g.SB_ULTRA_STATUS = "alle Spells auf Abklingzeit"; return end
-        busyUntil = os.clock() + 0.35                -- nicht doppelt ins Rad klicken
+        busyUntil = os.clock() + 0.35 + (tonumber(g.SB_ULTRA_SEL) or 0.2)  -- nicht doppelt ins Rad klicken
         local ok, why = wheelSelect(spell)
         if ok then
           g.SB_ROT_IDX = (i % #g.SB_SAFE_ROT) + 1    -- naechstes Mal ab dem folgenden Slot
@@ -2953,7 +2957,7 @@ local CFG_KEYS = {
   "SB_AIM_FOV", "SB_AIM_RANGE", "SB_AIM_PRED", "SB_AIM_NPC", "SB_AIM_PROJSPEED",
   "SB_AIM_SKIP_STAFF", "SB_AIM_ZONES", "SB_AIM_ZONEROLL",
   "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
-  "SB_ULTRA_SMOOTH", "SB_ULTRA_WHEEL", "SB_ULTRA_HOVER",
+  "SB_ULTRA_SMOOTH", "SB_ULTRA_WHEEL", "SB_ULTRA_SEL",
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
   "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_CLASH", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
@@ -3802,10 +3806,10 @@ local function mountGui()
       makeSliderW(sf, 2, "Reaktion bis Rad", 0, 0.5, function() return tonumber(g.SB_ULTRA_WHEEL) or 0.06 end,
         function(v) g.SB_ULTRA_WHEEL = math.floor(v * 100 + 0.5) / 100 end,
         function(v) return string.format("%.2fs", v) end)
-      makeSliderW(sf, 3, "Hover-Dauer", 0, 0.05, function() return tonumber(g.SB_ULTRA_HOVER) or 0.016 end,
-        function(v) g.SB_ULTRA_HOVER = math.floor(v * 1000 + 0.5) / 1000 end,
+      makeSliderW(sf, 3, "Auswahl-Dauer", 0.05, 0.5, function() return tonumber(g.SB_ULTRA_SEL) or 0.2 end,
+        function(v) g.SB_ULTRA_SEL = math.floor(v * 100 + 0.5) / 100 end,
         function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 4, "Castet nur nativ (dein Klick). Laedt den naechsten Spell ueber das echte Rad (~50ms), sobald der geladene verbraucht ist, und ueberspringt Spells auf Abklingzeit. Fake-Zeiger gleitet weich zum Silent-Aim-Ziel und ist auf Aufnahmen sichtbar. Rotation = Safe-Combat-Slots, die im Rad liegen.", 88)
+      addInfo(sf, 4, "Castet nur nativ (dein Klick). Laedt den naechsten Spell ueber das echte Rad (~0.2s, einstellbar), sobald der geladene verbraucht ist, und ueberspringt Spells auf Abklingzeit. Fake-Zeiger gleitet weich zum Silent-Aim-Ziel und ist auf Aufnahmen sichtbar. Rotation = Safe-Combat-Slots, die im Rad liegen.", 88)
     end)
 
   -- === Troll-Panel ===
