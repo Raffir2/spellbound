@@ -55,6 +55,7 @@ if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells 
 g.SB_SNIPE_BUSY = false                           -- Snipe beim Reload nicht "haengend"
 g.SB_LOCK_BUSY  = false                           -- Combo beim Reload nicht "haengend"
 g.SB_DEWAND, g.SB_DEWAND_LOOP = false, false      -- De-Wand beim Reload aus
+g.SB_OBSC = false                                 -- See-Obscuro beim Reload aus
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
@@ -1983,6 +1984,57 @@ local function doLockCombo()
   end)
 end
 
+--===================== SEE-OBSCURO: wer ist gerade geblendet? =====================--
+-- Der Server schickt jeden Spell-Treffer als hitSpellReplication an ALLE Clients, inklusive
+-- rayResult.Instance -> das getroffene Koerperteil und damit der Character des Opfers.
+-- Damit laesst sich mitlesen, wen ein obscuro erwischt hat (Effekt "blinded"), obwohl der
+-- Zustand selbst nicht repliziert wird (die Condition-Tags haengen nur beim Opfer lokal).
+-- Die Dauer steht nicht in den Spell-Daten, sie kommt vom Server - deshalb laeuft hier eine
+-- geschaetzte Anzeigedauer mit (einstellbar), die nur fuer den Countdown gebraucht wird.
+g.SB_OBSC_HITS  = type(g.SB_OBSC_HITS) == "table" and g.SB_OBSC_HITS or {}   -- [Name] = tick()
+g.SB_OBSC_TIME  = tonumber(g.SB_OBSC_TIME) or 5       -- angenommene Blindheits-Dauer in s
+if g.SB_OBSC_CONJ == nil then g.SB_OBSC_CONJ = true end  -- conjunctivitis mitzaehlen
+
+local OBSC_SPELLS = { obscuro = true }
+local function hookObscuro()
+  if g.SB_OBSC_HOOKED then return end
+  local okP, pk = pcall(function() return require(RS.packets) end)
+  if not (okP and pk and pk.hitSpellReplication) then return end
+  g.SB_OBSC_HOOKED = true
+  pk.hitSpellReplication.listen(function(p)
+    if not g.SB_OBSC then return end
+    if type(p) ~= "table" or type(p.rayResult) ~= "table" then return end
+    local name = tostring(p.spellName or "")
+    local blind = OBSC_SPELLS[name] or (g.SB_OBSC_CONJ and name == "conjunctivitis")
+    if not blind then return end
+    local inst = p.rayResult.Instance
+    if typeof(inst) ~= "Instance" then return end
+    local ch = inst:FindFirstAncestorWhichIsA("Model")
+    if not ch then return end
+    -- Nur echte Getroffene zaehlen: Treffer in Waenden loesen sonst auf das Map-Modell auf
+    -- ("MainHall", "Tower", ...) und wuerden als geblendete "Spieler" in der Liste landen.
+    local victim = Players:GetPlayerFromCharacter(ch)
+    local who
+    if victim then who = victim.Name
+    elseif ch:FindFirstChildOfClass("Humanoid") then who = ch.Name   -- NPC
+    else return end
+    g.SB_OBSC_HITS[who] = tick()
+    g.SB_OBSC_LAST = who .. " <- " .. name
+  end)
+end
+
+-- Liste der aktuell (vermutlich) Geblendeten, laengster Rest zuerst
+local function obscuroActive()
+  local out, now, dur = {}, tick(), tonumber(g.SB_OBSC_TIME) or 5
+  for who, t in pairs(g.SB_OBSC_HITS) do
+    local left = dur - (now - t)
+    if left > 0 then out[#out + 1] = { name = who, left = left }
+    else g.SB_OBSC_HITS[who] = nil end
+  end
+  table.sort(out, function(a, b) return a.left > b.left end)
+  return out
+end
+
 --=============== DE-WAND: markierte Spieler beim Zuecken des Stabs entwaffnen ===============--
 -- Man hakt in der Liste beliebig viele Spieler an. Eine Schleife beobachtet sie und schlaegt
 -- in dem Moment zu, in dem so einer wieder einen Stab in der Hand hat (z.B. direkt nach dem
@@ -2404,12 +2456,13 @@ local CFG_KEYS = {
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
   "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
+  "SB_OBSC_TIME", "SB_OBSC_CONJ",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
   "SB_CFG_AUTOSAVE", "SB_CFG_AUTOLOAD", "SB_CFG_MODULES", "SB_CFG_HOT",
 }
 local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS", "SB_DEWAND_LIST" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
-local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE",
+local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE", "SB_OBSC",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
 local CFG_HOTMODS = { "SB_FARM", "SB_KD", "SB_SHOT" }   -- greifen von selbst ins Spiel ein
 -- Streamproof bleibt bewusst draussen: gespeichert "an" waere die GUI nach dem Laden
@@ -2475,6 +2528,7 @@ local function cfgApplyModules(mods)
   if g.SB_CFG_MODULES then
     g.SB_AIM = on("SB_AIM");       if g.SB_AIM then startSelector(); startAim() end
     g.SB_SHIELD = on("SB_SHIELD"); if g.SB_SHIELD then hookShield() end
+    g.SB_OBSC = on("SB_OBSC");     if g.SB_OBSC then hookObscuro() end
     g.SB_CLASH = on("SB_CLASH");   if g.SB_CLASH then startClashAuto() end
     g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto(); startSealAttune() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
@@ -3147,6 +3201,26 @@ local function mountGui()
   addModule(combat, "Auto-Shield",
     function() return g.SB_SHIELD end,
     function(v) g.SB_SHIELD = v; if v then hookShield() end end)
+  addModule(combat, "See-Obscuro",
+    function() return g.SB_OBSC end,
+    function(v) g.SB_OBSC = v; if v then hookObscuro() end end,
+    function(sf)
+      makeSliderW(sf, 1, "Anzeigedauer", 1, 15, function() return tonumber(g.SB_OBSC_TIME) or 5 end,
+        function(v) g.SB_OBSC_TIME = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1fs", v) end)
+      makeToggleW(sf, 2, "conjunctivitis mitzaehlen", function() return g.SB_OBSC_CONJ == true end,
+        function() g.SB_OBSC_CONJ = not g.SB_OBSC_CONJ end)
+      local st = Instance.new("TextLabel"); st.Size = UDim2.new(1, -10, 0, 54); st.LayoutOrder = 3
+      st.BackgroundTransparency = 1; st.Font = Enum.Font.Gotham; st.TextSize = 11
+      st.TextColor3 = TXT_DIM; st.TextWrapped = true
+      st.TextXAlignment = Enum.TextXAlignment.Left; st.Parent = sf
+      moduleRefs[#moduleRefs + 1] = function()
+        if not st.Parent then return false end
+        st.Text = "  Liest Treffer aus hitSpellReplication mit: wer ein obscuro abbekommen hat, "
+          .. "steht oben rechts mit Restzeit. zuletzt: " .. tostring(g.SB_OBSC_LAST or "-")
+        return true
+      end
+    end)
   addModule(combat, "Auto-Clash",
     function() return g.SB_CLASH end,
     function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
@@ -3522,9 +3596,33 @@ local function mountGui()
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
     { "De-Wand",     function() return g.SB_DEWAND end },
+    { "See-Obscuro", function() return g.SB_OBSC end },
     { "KD-Farm",     function() return g.SB_KD end },
     { "Seal-Farm",   function() return g.SB_SEALFARM end },
   }
+  -- Geblendeten-Liste direkt unter der ArrayList (nur bei aktivem See-Obscuro)
+  local obscHolder = Instance.new("Frame")
+  obscHolder.AnchorPoint = Vector2.new(1, 0); obscHolder.Position = UDim2.new(1, -6, 0, AL_INSET + 150)
+  obscHolder.Size = UDim2.fromOffset(0, 0); obscHolder.AutomaticSize = Enum.AutomaticSize.XY
+  obscHolder.BackgroundTransparency = 1; obscHolder.Parent = gui
+  local ol = Instance.new("UIListLayout", obscHolder); ol.SortOrder = Enum.SortOrder.LayoutOrder
+  ol.HorizontalAlignment = Enum.HorizontalAlignment.Right; ol.Padding = UDim.new(0, 2)
+  local function rebuildObscuro()
+    for _, c in ipairs(obscHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
+    if not g.SB_OBSC then return end
+    local list = obscuroActive()
+    for idx, e in ipairs(list) do
+      local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
+      t.Size = UDim2.fromOffset(0, 20); t.LayoutOrder = idx
+      t.BackgroundColor3 = Color3.fromRGB(12, 13, 16); t.BackgroundTransparency = 0.15
+      t.Font = Enum.Font.GothamBold; t.TextSize = 14
+      t.TextColor3 = (e.name == lp.Name) and Color3.fromRGB(255, 170, 90) or Color3.fromRGB(150, 200, 255)
+      t.Text = string.format("  %s blind %.1fs  ", e.name, e.left); t.Parent = obscHolder
+      local b = Instance.new("Frame"); b.Size = UDim2.new(0, 3, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
+      b.BorderSizePixel = 0; b.BackgroundColor3 = t.TextColor3; b.Parent = t
+    end
+  end
+
   local function rebuildArray()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
     local on = {}
@@ -3553,9 +3651,11 @@ local function mountGui()
         if ok and alive == false then table.remove(moduleRefs, i) end
       end
       pcall(rebuildArray)
+      pcall(rebuildObscuro)
       -- Watchdog: Shotgun auch starten wenn der Toggle von aussen gesetzt wurde
       if g.SB_SHOT and not g.SB_SHOT_LOOP then pcall(startShotgun) end
       if g.SB_DEWAND and not g.SB_DEWAND_LOOP then pcall(startDeWand) end
+      if g.SB_OBSC and not g.SB_OBSC_HOOKED then pcall(hookObscuro) end
       task.wait(0.2)
     end
   end)
