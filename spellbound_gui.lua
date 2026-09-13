@@ -1465,8 +1465,8 @@ end
 --========================= Seal-Farm =========================--
 -- Autofarm fuer Seals (zeitlich begrenzte Welt-Events an festen Orten). Erkennt den aktiven
 -- Seal ueber sealStateSync, teleportiert hin und macht je nach Typ das Richtige:
---   Clash Seal: in Reichweite halten, auf den Orb casten (attunen), die Boegen spielt
---               Auto-Seal (wird waehrend der Seal-Farm automatisch mitgeschaltet).
+--   Clash Seal: in Reichweite halten, auf den Orb casten (attunen), das Minigame spielt
+--               Auto-Clash (normales Clashing-UI; wird waehrend der Seal-Farm mitgeschaltet).
 --   Blood Seal: Seal-NPCs (Attribut IsBloodSealNpc + BloodSealId) der Reihe nach killen -
 --               unter den NPC, casten bis er tot ist. Schaden UND Kills zaehlen zum Beitrag.
 --               Keine NPCs gerade -> am Seal warten.
@@ -1610,6 +1610,11 @@ local function startSealFarm()
   local sealWasOn = g.SB_SEAL
   g.SB_SEAL = true
   startSealAuto()
+  -- In-game bestaetigt: das Clash-Seal-Minigame laeuft ueber das normale Clashing-UI
+  -- (Server schickt keinen myArcSeed, Fortschritt kam mit Auto-Clash). Also mitschalten.
+  local clashWasOn = g.SB_CLASH
+  g.SB_CLASH = true
+  startClashAuto()
   task.spawn(function()
     local hrp0 = farmHRP(false)
     local home = hrp0 and hrp0.CFrame
@@ -1660,6 +1665,7 @@ local function startSealFarm()
     end
     -- Aufraeumen: Schaechte zu (sonst faellt man beim Entankern), dann heim und entankern
     g.SB_SEAL = sealWasOn
+    g.SB_CLASH = clashWasOn
     sealUnpin()
     pcall(restoreMap)
     local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
