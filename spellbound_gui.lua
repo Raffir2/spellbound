@@ -1992,7 +1992,7 @@ end
 -- Die Dauer steht nicht in den Spell-Daten, sie kommt vom Server - deshalb laeuft hier eine
 -- geschaetzte Anzeigedauer mit (einstellbar), die nur fuer den Countdown gebraucht wird.
 g.SB_OBSC_HITS  = type(g.SB_OBSC_HITS) == "table" and g.SB_OBSC_HITS or {}   -- [Name] = tick()
-g.SB_OBSC_TIME  = tonumber(g.SB_OBSC_TIME) or 5       -- angenommene Blindheits-Dauer in s
+g.SB_OBSC_TIME  = tonumber(g.SB_OBSC_TIME) or 10      -- Blindheits-Dauer in s (obscuro: 10s)
 if g.SB_OBSC_CONJ == nil then g.SB_OBSC_CONJ = true end  -- conjunctivitis mitzaehlen
 
 local OBSC_SPELLS = { obscuro = true }
@@ -2025,7 +2025,7 @@ end
 
 -- Liste der aktuell (vermutlich) Geblendeten, laengster Rest zuerst
 local function obscuroActive()
-  local out, now, dur = {}, tick(), tonumber(g.SB_OBSC_TIME) or 5
+  local out, now, dur = {}, tick(), tonumber(g.SB_OBSC_TIME) or 10
   for who, t in pairs(g.SB_OBSC_HITS) do
     local left = dur - (now - t)
     if left > 0 then out[#out + 1] = { name = who, left = left }
@@ -3205,7 +3205,7 @@ local function mountGui()
     function() return g.SB_OBSC end,
     function(v) g.SB_OBSC = v; if v then hookObscuro() end end,
     function(sf)
-      makeSliderW(sf, 1, "Anzeigedauer", 1, 15, function() return tonumber(g.SB_OBSC_TIME) or 5 end,
+      makeSliderW(sf, 1, "Anzeigedauer", 1, 20, function() return tonumber(g.SB_OBSC_TIME) or 10 end,
         function(v) g.SB_OBSC_TIME = math.floor(v * 10 + 0.5) / 10 end,
         function(v) return string.format("%.1fs", v) end)
       makeToggleW(sf, 2, "conjunctivitis mitzaehlen", function() return g.SB_OBSC_CONJ == true end,
