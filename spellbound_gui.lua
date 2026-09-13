@@ -1178,7 +1178,7 @@ local function startVisuals()
             o.stroke.Color = col; o.box.Visible = true
           else o.box.Visible = false end
           if g.SB_ESP_NAMES then
-            o.nm.Text = pl.Name; o.nm.TextColor3 = col
+            o.nm.Text = (pl.DisplayName ~= "" and pl.DisplayName) or pl.Name; o.nm.TextColor3 = col  -- Anzeigename wie im Spiel
             o.nm.Position = UDim2.fromOffset(minX + w * 0.5 - 110, minY - 16)
             o.nm.Visible = true
             -- "Moderator" direkt unter dem Namen, hellblau (nur bei Staff)
