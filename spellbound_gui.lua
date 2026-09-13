@@ -198,9 +198,14 @@ g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
 g.SB_ULTRA, g.SB_ULTRA_LOOP = false, false -- Ultra Legit beim Reload aus
 g.SB_AIM_POINT = nil
-pcall(function()                           -- evtl. vom Fake-Zeiger ueberschriebene Mausposition freigeben
+-- Silent-Aim beim Reload aus: die alte Aim-Verbindung wird unten getrennt und SB_AIM_LOOP oben
+-- zurueckgesetzt. Blieb SB_AIM an, zeigte der Toggle "an", ohne dass ein Loop lief, und der
+-- letzte Hit klebte fest (Schuesse auf einen festen Punkt). Autoload/Toggle starten ihn sauber neu.
+g.SB_AIM = false
+pcall(function()                           -- evtl. vom Fake-Zeiger/Aim ueberschriebene Maus freigeben
   local pmR = require(game:GetService("ReplicatedStorage").shared.modules.PlayerMouse):GetMouse()
   rawset(pmR, "Position", nil)
+  rawset(pmR, "Hit", nil)
 end)
 g.SB_SEAL_ATTUNE_LOOP = false
 g.SB_SEALFARM, g.SB_SEALFARM_LOOP = false, false -- Seal-Farm beim Reload aus
