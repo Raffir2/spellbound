@@ -148,6 +148,29 @@ pcall(function()
   P3.__sbGuarded = true
 end)
 
+-- Treffer-Effekte: shared.modules.hitEffects.hit() laeuft im Treffer-Handler von spells-e4
+-- VOR setPosition. Aufs Projektil greift es nur ueber getDirection() zu (oben abgesichert),
+-- hat aber eine eigene Stolperstelle: FindFirstChild("Humanoid") und direkt danach
+-- Humanoid.Health ohne Pruefung (Modell mit Charakter-Teilen, aber ohne Humanoid).
+-- hit() laeuft deshalb in pcall; im Fehlerfall kommt { miss = true } zurueck - genau die
+-- Form, die das Spiel selbst fuer einen Fehlschuss liefert, der Aufrufer kann damit umgehen.
+pcall(function()
+  local RSg = game:GetService("ReplicatedStorage")
+  local mod = RSg:FindFirstChild("shared") and RSg.shared:FindFirstChild("modules")
+              and RSg.shared.modules:FindFirstChild("hitEffects")
+  if not mod then return end
+  local ok, HE = pcall(require, mod)
+  if not ok or type(HE) ~= "table" or rawget(HE, "__sbGuarded") then return end
+  local orig = rawget(HE, "hit")
+  if type(orig) ~= "function" then return end
+  HE.hit = function(...)
+    local res = table.pack(pcall(orig, ...))
+    if res[1] then return table.unpack(res, 2, res.n) end
+    return { miss = true }
+  end
+  HE.__sbGuarded = true
+end)
+
 -- === Re-Execute-Cleanup: altes vollstaendig killen, keine Zombies ===
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
