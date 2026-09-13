@@ -3176,6 +3176,7 @@ local function mountGui()
 
   -- === Panel (Kategorie) ===
   local PANEL_W = 132
+  local SET_MAX = 230                   -- max. Hoehe eines Einstellungs-Blocks (unskaliert), darueber scrollt er
   local function makePanel(title, px, py)
     local panel = Instance.new("Frame")
     panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
@@ -3198,14 +3199,37 @@ local function mountGui()
     hmark.Position = UDim2.new(1, -18, 0, 0); hmark.BackgroundTransparency = 1
     hmark.Font = Enum.Font.GothamBold; hmark.TextSize = 13; hmark.TextColor3 = DARKTXT
     hmark.AutoButtonColor = false; hmark.Text = "\xe2\x80\x93"; hmark.Parent = head
-    local body = Instance.new("Frame"); body.BackgroundTransparency = 1
-    body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
+    -- Inhalt scrollt, sobald das Panel sonst ueber den unteren Bildschirmrand ragen wuerde.
+    -- Hoehe = Inhalt, gedeckelt auf den Platz bis zum Rand; nachgerechnet bei neuem Inhalt,
+    -- beim Verschieben des Panels und bei geaenderter Fenstergroesse. AbsoluteContentSize ist
+    -- in Bildschirm-Pixeln, der Host ist um UI_SCALE skaliert -> zurueckrechnen.
+    local body = Instance.new("ScrollingFrame"); body.BackgroundTransparency = 1
+    body.Size = UDim2.new(1, 0, 0, 0); body.BorderSizePixel = 0
+    body.ScrollBarThickness = 3; body.ScrollBarImageColor3 = ACCENT
+    body.ScrollingDirection = Enum.ScrollingDirection.Y
+    body.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+    body.CanvasSize = UDim2.new(0, 0, 0, 0)
     body.LayoutOrder = 1; body.Parent = panel
     local bl = Instance.new("UIListLayout", body); bl.SortOrder = Enum.SortOrder.LayoutOrder
     bl.Padding = UDim.new(0, 1)
     local bp = Instance.new("UIPadding", body)
     bp.PaddingTop = UDim.new(0, 2); bp.PaddingBottom = UDim.new(0, 3)
     bp.PaddingLeft = UDim.new(0, 2); bp.PaddingRight = UDim.new(0, 2)
+    local function fitBody()
+      if not body.Parent then return end
+      local content = bl.AbsoluteContentSize.Y / UI_SCALE + 5
+      local cam = workspace.CurrentCamera
+      local screenH = (cam and cam.ViewportSize.Y or 1080) / UI_SCALE
+      local avail = screenH - panel.Position.Y.Offset - 21 - 12
+      body.CanvasSize = UDim2.fromOffset(0, content)
+      body.Size = UDim2.new(1, 0, 0, math.max(60, math.min(content, avail)))
+    end
+    bl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitBody)
+    panel:GetPropertyChangedSignal("Position"):Connect(fitBody)
+    if workspace.CurrentCamera then
+      table.insert(g.SB_CONNS, workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitBody))
+    end
+    task.defer(fitBody)
     -- Einklappen (Klick auf das Zeichen rechts im Header)
     hmark.MouseButton1Click:Connect(function()
       body.Visible = not body.Visible
@@ -3236,14 +3260,28 @@ local function mountGui()
     local function toggle()
       expanded = not expanded
       if expanded then
-        sf = Instance.new("Frame"); sf.LayoutOrder = ord * 10 + 1
-        sf.Size = UDim2.new(1, 0, 0, 0); sf.AutomaticSize = Enum.AutomaticSize.Y
+        -- Scrollbar statt endlos lang (z.B. Silent-Aim): der Block wird hoechstens SET_MAX hoch
+        -- und scrollt darueber hinaus; die Hoehe folgt dem Inhalt.
+        sf = Instance.new("ScrollingFrame"); sf.LayoutOrder = ord * 10 + 1
+        sf.Size = UDim2.new(1, 0, 0, 0)
         sf.BackgroundColor3 = SET_BG; sf.BorderSizePixel = 0; sf.Parent = panel.body
+        sf.ScrollBarThickness = 3; sf.ScrollBarImageColor3 = ACCENT
+        sf.ScrollingDirection = Enum.ScrollingDirection.Y
+        sf.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
+        sf.CanvasSize = UDim2.new(0, 0, 0, 0)
         corner(sf, 2)
         local sl = Instance.new("UIListLayout", sf); sl.SortOrder = Enum.SortOrder.LayoutOrder
         sl.Padding = UDim.new(0, 3); sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
         local spad = Instance.new("UIPadding", sf)
         spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
+        local thisSf = sf
+        local function fitSettings()
+          if not thisSf.Parent then return end
+          local content = sl.AbsoluteContentSize.Y / UI_SCALE + 11
+          thisSf.CanvasSize = UDim2.fromOffset(0, content)
+          thisSf.Size = UDim2.new(1, 0, 0, math.min(content, SET_MAX))
+        end
+        sl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitSettings)
         -- gruene Kante links als Verlauf auf dem Hintergrund (ein echtes Frame mit
         -- Size.Y.Scale=1 wuerde unter dem UIListLayout mit AutomaticSize zurueckkoppeln)
         local eg = Instance.new("UIGradient", sf)
@@ -3251,6 +3289,8 @@ local function mountGui()
           ColorSequenceKeypoint.new(0, ACCENT), ColorSequenceKeypoint.new(0.016, ACCENT),
           ColorSequenceKeypoint.new(0.017, SET_BG), ColorSequenceKeypoint.new(1, SET_BG) })
         buildSettings(sf)
+        fitSettings()
+        task.defer(fitSettings)
         if arrow then arrow.Text = "\xe2\x80\x93" end
       else
         if sf then sf:Destroy(); sf = nil end
