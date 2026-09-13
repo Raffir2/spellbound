@@ -3279,49 +3279,6 @@ local function mountGui()
   lgh.TextXAlignment = Enum.TextXAlignment.Left
   lgh.Text = "0% = voller Cheat. Bei X% failt jede Aktion (Aim/Dodge/Shield/Clash/Cast) mit X% Wahrscheinlichkeit."
   lgh.Parent = cfg.body
-  addAction(cfg, function() return "Hotkeys" end, function() end,
-    function(sf)
-      local hint = Instance.new("TextLabel"); hint.Size = UDim2.new(1, -12, 0, 30); hint.LayoutOrder = 0
-      hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 11
-      hint.TextColor3 = Color3.fromRGB(150, 150, 170); hint.TextWrapped = true
-      hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Parent = sf
-      hint.Text = "Zeile anklicken, dann neue Taste druecken. Escape = abbrechen, Backspace = keine Taste."
-      for idx, a in ipairs(KEY_ACTIONS) do
-        local row = Instance.new("TextButton")
-        row.Size = UDim2.new(1, -12, 0, 20); row.LayoutOrder = idx; row.AutoButtonColor = false
-        row.BackgroundColor3 = Color3.fromRGB(34, 30, 50); row.BorderSizePixel = 0
-        row.Font = Enum.Font.Gotham; row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left
-        row.TextColor3 = Color3.fromRGB(215, 210, 235); row.Parent = sf; corner(row, 4)
-        local val = Instance.new("TextLabel"); val.Size = UDim2.fromOffset(90, 20)
-        val.Position = UDim2.new(1, -92, 0, 0); val.BackgroundTransparency = 1
-        val.Font = Enum.Font.GothamBold; val.TextSize = 12; val.TextXAlignment = Enum.TextXAlignment.Right
-        val.TextColor3 = ACCENT; val.Parent = row
-        row.Text = "  " .. a.label
-        local function paint()
-          if not val.Parent then return end
-          if g.SB_KEYBIND_WAIT == a.id then
-            val.Text = "[Taste druecken]"; val.TextColor3 = Color3.fromRGB(255, 200, 90)
-          else
-            val.Text = keyName(a.id); val.TextColor3 = ACCENT
-          end
-        end
-        paint(); moduleRefs[#moduleRefs + 1] = paint
-        row.MouseButton1Click:Connect(function()
-          g.SB_KEYBIND_WAIT = (g.SB_KEYBIND_WAIT == a.id) and nil or a.id
-          paint()
-        end)
-      end
-      local rb = Instance.new("TextButton"); rb.Size = UDim2.new(1, -12, 0, 20)
-      rb.LayoutOrder = #KEY_ACTIONS + 1; rb.BackgroundColor3 = Color3.fromRGB(60, 30, 40)
-      rb.BorderSizePixel = 0; rb.Font = Enum.Font.Gotham; rb.TextSize = 12
-      rb.TextColor3 = Color3.fromRGB(235, 210, 215); rb.Text = "Standard wiederherstellen"
-      rb.Parent = sf; corner(rb, 4)
-      rb.MouseButton1Click:Connect(function()
-        for _, a in ipairs(KEY_ACTIONS) do g.SB_KEYS[a.id] = a.def end
-        g.SB_KEYBIND_WAIT = nil
-      end)
-    end)
-
   addAction(cfg, function()
       return "Config: " .. tostring(g.SB_CFG_NAME) .. (g.SB_CFG_SAVED and ("  " .. g.SB_CFG_SAVED) or "")
     end,
@@ -3344,6 +3301,50 @@ local function mountGui()
         function() g.SB_CFG_HOT = not g.SB_CFG_HOT end)
       addInfo(sf, 10, "Slots liegen als JSON im Executor-Ordner spellbound_configs und ueberleben den Rejoin. Auto-Save schreibt alle 2s, aber nur bei Aenderungen. Farm/KD/Shotgun starten beim Laden nur, wenn die letzte Option an ist.", 76)
     end)
+  -- === Keybinds-Panel: alle Tasten auf einen Blick, direkt umbelegbar ===
+  local keysP = makePanel("Keybinds", 26 + (PANEL_W + 10) * 4, 40)
+  for idx, a in ipairs(KEY_ACTIONS) do
+    local row = Instance.new("TextButton")
+    row.Size = UDim2.new(1, 0, 0, ROW_H); row.LayoutOrder = idx * 10; row.AutoButtonColor = false
+    row.BackgroundColor3 = ROW_OFF; row.BorderSizePixel = 0; row.Font = Enum.Font.Gotham
+    row.TextSize = 12; row.TextXAlignment = Enum.TextXAlignment.Left
+    row.TextColor3 = TXT; row.Text = "  " .. a.label; row.Parent = keysP.body
+    local val = Instance.new("TextLabel")
+    val.Size = UDim2.fromOffset(78, ROW_H); val.Position = UDim2.new(1, -80, 0, 0)
+    val.BackgroundTransparency = 1; val.Font = Enum.Font.GothamBold; val.TextSize = 12
+    val.TextXAlignment = Enum.TextXAlignment.Right; val.TextColor3 = ACCENT; val.Parent = row
+    local function paint()
+      if not val.Parent then return false end                 -- Widget weg -> aus der Liste
+      local waiting = (g.SB_KEYBIND_WAIT == a.id)
+      val.Text = waiting and "druecke..." or keyName(a.id)
+      val.TextColor3 = waiting and Color3.fromRGB(255, 200, 90) or ACCENT
+      row.BackgroundColor3 = waiting and Color3.fromRGB(40, 34, 20) or ROW_OFF
+      return true
+    end
+    paint(); moduleRefs[#moduleRefs + 1] = paint
+    row.MouseButton1Click:Connect(function()
+      g.SB_KEYBIND_WAIT = (g.SB_KEYBIND_WAIT == a.id) and nil or a.id
+      paint()
+    end)
+  end
+  do  -- Fusszeile: Standard-Tasten + Kurzhilfe
+    local rb = Instance.new("TextButton")
+    rb.Size = UDim2.new(1, 0, 0, ROW_H); rb.LayoutOrder = (#KEY_ACTIONS + 1) * 10
+    rb.BackgroundColor3 = Color3.fromRGB(46, 26, 32); rb.BorderSizePixel = 0
+    rb.Font = Enum.Font.Gotham; rb.TextSize = 12; rb.TextColor3 = Color3.fromRGB(235, 210, 215)
+    rb.Text = "  Standard"; rb.TextXAlignment = Enum.TextXAlignment.Left; rb.Parent = keysP.body
+    rb.MouseButton1Click:Connect(function()
+      for _, a in ipairs(KEY_ACTIONS) do g.SB_KEYS[a.id] = a.def end
+      g.SB_KEYBIND_WAIT = nil
+    end)
+    local hint = Instance.new("TextLabel")
+    hint.Size = UDim2.new(1, -8, 0, 40); hint.LayoutOrder = (#KEY_ACTIONS + 2) * 10
+    hint.BackgroundTransparency = 1; hint.Font = Enum.Font.Gotham; hint.TextSize = 10
+    hint.TextColor3 = Color3.fromRGB(140, 140, 160); hint.TextWrapped = true
+    hint.TextXAlignment = Enum.TextXAlignment.Left; hint.Parent = keysP.body
+    hint.Text = "  Zeile klicken, Taste druecken. Esc = abbrechen, Backspace = keine Taste."
+  end
+
   addModule(cfg, "Streamproof [Bild-Ab]",
     function() return g.SB_STREAMPROOF == true end,
     function(v) setStreamproof(v) end)
