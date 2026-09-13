@@ -1170,6 +1170,16 @@ local function isAirborne(pl)
   local t = tonumber(ch:GetAttribute("TIMING_TAG_PLAYER_APPARATING"))
   return t ~= nil and (workspace:GetServerTimeNow() - t) < 2.5
 end
+
+if g.SB_FARM_SKIP_CLASH == nil then g.SB_FARM_SKIP_CLASH = true end   -- Spieler im Clash-Duell auslassen
+
+-- Im Clash-Duell: der Server setzt am Charakter BEIDER Teilnehmer IsClashing=true und
+-- ClashingWith="player:<UserId>"; beim Ende ClashingWith=nil und IsClashing=false.
+-- In-game mitgeschnitten (Duell lief 42s, Reset kam zeitgleich mit dem "end"-Paket).
+local function isInClash(pl)
+  local ch = pl and pl.Character
+  return ch ~= nil and (ch:GetAttribute("IsClashing") == true or ch:GetAttribute("ClashingWith") ~= nil)
+end
 if g.SB_FARM_SKIP_STAFF   == nil then g.SB_FARM_SKIP_STAFF = true end    -- Moderatoren auslassen
 if g.SB_FARM_RETURN       == nil then g.SB_FARM_RETURN = true end        -- am Ende zurueck
 if g.SB_FARM_REPEAT       == nil then g.SB_FARM_REPEAT = true end        -- endlos rotieren
@@ -1355,6 +1365,7 @@ local function farmTargets()
         if isFriend(pl) then skip = true end
         if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
         if g.SB_FARM_SKIP_AIR and isAirborne(pl) then skip = true end
+        if g.SB_FARM_SKIP_CLASH and isInClash(pl) then skip = true end
         if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
         if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
       end
@@ -1398,6 +1409,7 @@ local function startFarm()
           -- Safe-Zone kann sich waehrend der Runde aendern -> direkt vor dem Hop nochmal pruefen
           local safe = (g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true)
                     or (g.SB_FARM_SKIP_AIR and isAirborne(pl))
+                    or (g.SB_FARM_SKIP_CLASH and isInClash(pl))
           if root and hum and hum.Health > 0 and not safe then
             g.SB_FARM_TARGET = pl.Name
             local depth = tonumber(g.SB_FARM_DEPTH) or 15
@@ -1410,6 +1422,7 @@ local function startFarm()
               -- Ziel koennte inzwischen weg/tot/in einer Safe Zone sein -> frisch pruefen
               local stillSafe = (g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true)
                              or (g.SB_FARM_SKIP_AIR and isAirborne(pl))
+                             or (g.SB_FARM_SKIP_CLASH and isInClash(pl))
               if g.SB_FARM and root.Parent and hum.Health > 0 and not stillSafe and not isStunnedOrBound() then
                 farmCast(root, hum)
               end
@@ -2530,7 +2543,7 @@ local CFG_KEYS = {
   "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
-  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
+  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_CLASH", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
   "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
@@ -3478,7 +3491,9 @@ local function mountGui()
         function() g.SB_FARM_FIXWAND = not g.SB_FARM_FIXWAND end)
       makeToggleW(sf, 15, "Fliegende/Apparierende auslassen", function() return g.SB_FARM_SKIP_AIR == true end,
         function() g.SB_FARM_SKIP_AIR = not g.SB_FARM_SKIP_AIR end)
-      addInfo(sf, 16, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
+      makeToggleW(sf, 16, "Spieler im Clash auslassen", function() return g.SB_FARM_SKIP_CLASH == true end,
+        function() g.SB_FARM_SKIP_CLASH = not g.SB_FARM_SKIP_CLASH end)
+      addInfo(sf, 17, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
     end)
   addModule(farm, "Seal-Farm",
     function() return g.SB_SEALFARM end,
