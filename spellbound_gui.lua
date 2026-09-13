@@ -51,7 +51,8 @@ g.SB_SHOT_IV    = tonumber(g.SB_SHOT_IV)    or 0.02  -- Abstand: 1 Frame, kleins
 g.SB_SHOT_BURST = tonumber(g.SB_SHOT_BURST) or 6     -- Schuesse pro Klick (Rate-Limit!)
 if g.SB_SHOT_REEQUIP == nil then g.SB_SHOT_REEQUIP = true end  -- Stab vor jedem Schuss neu ziehen
 if g.SB_SHOT_UNIQUE  == nil then g.SB_SHOT_UNIQUE  = true end  -- unique-Spells mitnehmen
-g.SB_SNIPE_BUSY = false                           -- Snipe (M) beim Reload nicht "haengend"
+g.SB_SNIPE_BUSY = false
+g.SB_LOCK_BUSY  = false                           -- Combo (M) beim Reload nicht haengend                           -- Snipe (M) beim Reload nicht "haengend"
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
@@ -1870,6 +1871,116 @@ local function doSnipe()
   end)
 end
 
+--=============== COMBO (Taste M): unten festnageln, oben normal abschiessen ===============--
+-- Umgekehrte Reihenfolge zum Snipe: erst TP unter das Ziel und von dort den Halte-Spell
+-- (default "locomotor mortis" -> stunned) nach oben, sofort zurueck an den Startpunkt und DANN
+-- ganz normal von der eigenen Position mit dem naechsten Safe-Combat-Spell nachlegen.
+-- Fuer alle anderen sieht nur der zweite, normale Schuss nach einem Angriff aus; der Stun
+-- davor kommt scheinbar aus dem Nichts und das Ziel steht fuer den Nachschlag still.
+g.SB_LOCK_SPELL = g.SB_LOCK_SPELL or resolveSpell("locomotor mortis")
+g.SB_LOCK_DEPTH = tonumber(g.SB_LOCK_DEPTH) or 15      -- Studs unter dem Ziel
+g.SB_LOCK_DELAY = tonumber(g.SB_LOCK_DELAY) or 0.05    -- Wartezeit nach dem TP vor dem Cast
+g.SB_LOCK_GAP   = tonumber(g.SB_LOCK_GAP)   or 0.05    -- Pause daheim vor dem normalen Schuss
+if g.SB_LOCK_CARVE == nil then g.SB_LOCK_CARVE = true end
+
+local function doLockCombo()
+  if g.SB_LOCK_BUSY or g.SB_SNIPE_BUSY then return end
+  if g.SB_FARM or g.SB_SEALFARM then g.SB_LOCK_STATUS = "Farm laeuft"; return end
+  local pl   = snipePickTarget()
+  local ch   = pl and pl.Character
+  local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
+  local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
+  local hrp  = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+  if not (pl and root and hum and hrp) then g.SB_LOCK_STATUS = "kein Ziel"; return end
+  if isStunnedOrBound() or isRagdolled() then g.SB_LOCK_STATUS = "gestunnt"; return end
+  g.SB_LOCK_BUSY = true
+  startSelector()                                   -- haelt g.SB_REFS/Wand-Closures aktuell
+  task.spawn(function()
+    local home       = hrp.CFrame
+    local carveKey   = nil
+    local holdAnchor = false
+    local lockSpell  = resolveSpell(g.SB_LOCK_SPELL or "locomotor mortis")
+
+    -- 1) UNTER das Ziel und den Halte-Spell nach oben feuern
+    pcall(function()
+      local depth = tonumber(g.SB_LOCK_DEPTH) or 15
+      local spot  = root.Position - Vector3.new(0, depth, 0)
+      if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
+      if g.SB_LOCK_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
+        carveKey = carveShaft(spot, root.Position)   -- schmale Saeule nach oben
+      end
+      task.wait(tonumber(g.SB_LOCK_DELAY) or 0.05)
+      if root.Parent and hum.Health > 0 and farmCast(root, hum, lockSpell) then
+        g.SB_LOCK_STATUS = pl.Name .. " festgenagelt (" .. lockSpell .. ")"
+      else
+        g.SB_LOCK_STATUS = "Halte-Spell fehlgeschlagen"
+      end
+    end)
+
+    -- 2) zurueck auf den Startpunkt (ganzes Modell + Kamera), verankert bis der Schacht zu ist
+    local function goHome()
+      local ch2  = lp.Character
+      local hrp2 = ch2 and ch2:FindFirstChild("HumanoidRootPart")
+      if not (ch2 and hrp2) then return end
+      pcall(function() ch2:PivotTo(home) end)
+      hrp2.AssemblyLinearVelocity = Vector3.zero
+      hrp2.Anchored = holdAnchor
+      local hum2 = ch2:FindFirstChildOfClass("Humanoid")
+      local cam  = workspace.CurrentCamera
+      if cam and hum2 and cam.CameraSubject ~= hum2 then cam.CameraSubject = hum2 end
+    end
+    holdAnchor = (carveKey ~= nil)
+    goHome()
+    task.spawn(function()
+      for _ = 1, 4 do                                -- Nachhalten gegen Physik-Rubberband
+        RunService.Heartbeat:Wait()
+        local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp2 then
+          if (hrp2.Position - home.Position).Magnitude > 3 then goHome() end
+          if hrp2.Anchored ~= holdAnchor then hrp2.Anchored = holdAnchor end
+        end
+      end
+    end)
+    if carveKey then                                 -- Schacht sofort wieder zu, dann entankern
+      local key = carveKey
+      task.spawn(function()
+        task.wait(0.15)
+        pcall(uncarveCells, key)
+        holdAnchor = false
+        local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
+      end)
+      task.delay(2, function()                       -- Notbremse: nie festkleben
+        holdAnchor = false
+        local hrp2 = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+        if hrp2 and hrp2.Anchored and not g.SB_FARM then hrp2.Anchored = false end
+      end)
+    end
+
+    -- 3) NORMALER Schuss von daheim: naechster Slot der Safe-Combat-Rotation
+    task.wait(tonumber(g.SB_LOCK_GAP) or 0.05)
+    pcall(function()
+      if not (root.Parent and hum.Health > 0) then
+        g.SB_LOCK_STATUS = pl.Name .. ": Halte-Spell hat gereicht"
+        return
+      end
+      local ROT   = g.SB_SAFE_ROT or {}
+      local idx   = tonumber(g.SB_ROT_IDX) or 1
+      local spell = ROT[idx] or ROT[1]
+      if spell then
+        g.SB_ROT_IDX = (idx % math.max(#ROT, 1)) + 1
+        if farmCast(root, hum, spell) then
+          g.SB_LOCK_COUNT  = (tonumber(g.SB_LOCK_COUNT) or 0) + 1
+          g.SB_LOCK_STATUS = pl.Name .. " / " .. lockSpell .. " + " .. spell
+        else
+          g.SB_LOCK_STATUS = "Nachschlag fehlgeschlagen"
+        end
+      end
+    end)
+    g.SB_LOCK_BUSY = false
+  end)
+end
+
 --========================= SHOTGUN (Troll) =========================--
 -- Feuert NIE von selbst: nur ein echter Linksklick (InputBegan) loest EINEN Burst aus —
 -- genau SB_SHOT_BURST (=6) Spells hintereinander, Takt SB_SHOT_IV (=0.02s = 1 Frame, der
@@ -2961,6 +3072,34 @@ local function mountGui()
       end
     end)
 
+  addAction(troll, function() return "Combo [M] \xe2\x86\x92 " .. tostring(g.SB_AIM_TARGET or "Cursor-Ziel") end,
+    function() task.spawn(doLockCombo) end,
+    function(sf)
+      makeDropdownW(sf, 1, function() return "Halte-Spell: " .. tostring(g.SB_LOCK_SPELL) end,
+        getSpellList, function(n) g.SB_LOCK_SPELL = n end)
+      makeSliderW(sf, 2, "Tiefe", 5, 60, function() return tonumber(g.SB_LOCK_DEPTH) or 15 end,
+        function(v) g.SB_LOCK_DEPTH = math.floor(v + 0.5) end,
+        function(v) return math.floor(v + 0.5) .. " Studs" end)
+      makeSliderW(sf, 3, "Cast-Delay", 0, 0.3, function() return tonumber(g.SB_LOCK_DELAY) or 0.05 end,
+        function(v) g.SB_LOCK_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      makeSliderW(sf, 4, "Pause daheim", 0, 0.5, function() return tonumber(g.SB_LOCK_GAP) or 0.05 end,
+        function(v) g.SB_LOCK_GAP = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      makeToggleW(sf, 5, "Terrain-Schacht", function() return g.SB_LOCK_CARVE ~= false end,
+        function() g.SB_LOCK_CARVE = not (g.SB_LOCK_CARVE ~= false) end)
+      local lb = Instance.new("TextLabel"); lb.Size = UDim2.new(1, -12, 0, 46); lb.LayoutOrder = 6
+      lb.BackgroundTransparency = 1; lb.Font = Enum.Font.Gotham; lb.TextSize = 11
+      lb.TextColor3 = Color3.fromRGB(150, 150, 170); lb.TextWrapped = true
+      lb.TextXAlignment = Enum.TextXAlignment.Left; lb.Parent = sf
+      moduleRefs[#moduleRefs + 1] = function()
+        if not lb.Parent then return end
+        lb.Text = "M: TP unter das Ziel, Halte-Spell nach oben, zurueck an den Startpunkt, dann "
+          .. "normaler Safe-Combat-Schuss von hier. zuletzt: " .. tostring(g.SB_LOCK_STATUS or "-")
+          .. " (" .. (tonumber(g.SB_LOCK_COUNT) or 0) .. ")"
+      end
+    end)
+
   -- === Farm-Panel (Autofarm, Map-Handling, KD) ===
   local farm = makePanel("Farm", 26 + PANEL_W + 10, 40)
   addModule(farm, "Autofarm",
@@ -3233,6 +3372,8 @@ local function mountGui()
       g.SB_APPA_PENDING = true; disarmSpell(); startSelector()
     elseif i.KeyCode == Enum.KeyCode.E then
       doSnipe()                                   -- 1 Ziel: runter, Spell, zurueck
+    elseif i.KeyCode == Enum.KeyCode.M then
+      doLockCombo()                               -- runter, festnageln, zurueck, normal schiessen
     end
   end))
 
