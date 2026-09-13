@@ -56,6 +56,8 @@ g.SB_SNIPE_BUSY = false                           -- Snipe beim Reload nicht "ha
 g.SB_LOCK_BUSY  = false                           -- Combo beim Reload nicht "haengend"
 g.SB_DEWAND, g.SB_DEWAND_LOOP = false, false      -- De-Wand beim Reload aus
 g.SB_OBSC = false                                 -- See-Obscuro beim Reload aus
+pcall(function() if g.SB_OBSC_VIS then g.SB_OBSC_VIS:Disconnect() end end)
+g.SB_OBSC_VIS = nil               -- alte Kopf-Anzeige loesen (GUI wird neu gebaut)
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
@@ -1996,31 +1998,110 @@ g.SB_OBSC_TIME  = tonumber(g.SB_OBSC_TIME) or 10      -- Blindheits-Dauer in s (
 if g.SB_OBSC_CONJ == nil then g.SB_OBSC_CONJ = true end  -- conjunctivitis mitzaehlen
 
 local OBSC_SPELLS = { obscuro = true }
+-- Einen Treffer auswerten (egal ob fremder oder eigener) und das Opfer merken.
+local function obscRecord(p)
+  if not g.SB_OBSC then return end
+  if type(p) ~= "table" or type(p.rayResult) ~= "table" then return end
+  local name = tostring(p.spellName or "")
+  local blind = OBSC_SPELLS[name] or (g.SB_OBSC_CONJ and name == "conjunctivitis")
+  if not blind then return end
+  local inst = p.rayResult.Instance
+  if typeof(inst) ~= "Instance" then return end
+  local ch = inst:FindFirstAncestorWhichIsA("Model")
+  if not ch then return end
+  -- Nur echte Getroffene zaehlen: Treffer in Waenden loesen sonst auf das Map-Modell auf
+  -- ("MainHall", "Tower", ...) und wuerden als geblendete "Spieler" in der Liste landen.
+  local victim = Players:GetPlayerFromCharacter(ch)
+  local who
+  if victim then who = victim.Name
+  elseif ch:FindFirstChildOfClass("Humanoid") then who = ch.Name   -- NPC
+  else return end
+  g.SB_OBSC_HITS[who] = tick()
+  g.SB_OBSC_LAST = who .. " <- " .. name
+end
+
+-- Dispatcher: Listener und send-Wrapper rufen IMMER g.SB_OBSC_ONHIT. Das setzt jeder Load
+-- neu, sonst friert der erste Load seine Closure ein und spaetere Aenderungen greifen nie.
+g.SB_OBSC_ONHIT = function(p) pcall(obscRecord, p) end
+
 local function hookObscuro()
-  if g.SB_OBSC_HOOKED then return end
   local okP, pk = pcall(function() return require(RS.packets) end)
   if not (okP and pk and pk.hitSpellReplication) then return end
-  g.SB_OBSC_HOOKED = true
-  pk.hitSpellReplication.listen(function(p)
-    if not g.SB_OBSC then return end
-    if type(p) ~= "table" or type(p.rayResult) ~= "table" then return end
-    local name = tostring(p.spellName or "")
-    local blind = OBSC_SPELLS[name] or (g.SB_OBSC_CONJ and name == "conjunctivitis")
-    if not blind then return end
-    local inst = p.rayResult.Instance
-    if typeof(inst) ~= "Instance" then return end
-    local ch = inst:FindFirstAncestorWhichIsA("Model")
-    if not ch then return end
-    -- Nur echte Getroffene zaehlen: Treffer in Waenden loesen sonst auf das Map-Modell auf
-    -- ("MainHall", "Tower", ...) und wuerden als geblendete "Spieler" in der Liste landen.
-    local victim = Players:GetPlayerFromCharacter(ch)
-    local who
-    if victim then who = victim.Name
-    elseif ch:FindFirstChildOfClass("Humanoid") then who = ch.Name   -- NPC
-    else return end
-    g.SB_OBSC_HITS[who] = tick()
-    g.SB_OBSC_LAST = who .. " <- " .. name
+  -- a) fremde Treffer: der Server schickt sie an alle Clients (Listener nur EINMAL pro Session,
+  --    ByteNet laesst ihn nicht wieder abhaengen)
+  if not g.SB_OBSC_HOOKED then
+    g.SB_OBSC_HOOKED = true
+    pk.hitSpellReplication.listen(function(p)
+      local h = g.SB_OBSC_ONHIT; if h then h(p) end
+    end)
+  end
+  -- b) EIGENE Treffer laufen nur RAUS (send) und kommen nie per listen zurueck - im Spiel
+  --    nachgemessen: 11 gesendete Treffer, kein einziger davon eingehend. Also das Senden
+  --    mitlesen (Feld ersetzen, kein hookfunction noetig).
+  if not g.SB_OBSC_SENDHOOK then
+    local orig = pk.hitSpellReplication.send
+    if type(orig) == "function" then
+      g.SB_OBSC_SENDHOOK = true
+      pk.hitSpellReplication.send = function(...)
+        local h = g.SB_OBSC_ONHIT; if h then h(...) end
+        return orig(...)
+      end
+    end
+  end
+end
+
+-- Anzeige ueber dem Kopf: eigene ESP-Ebene, projiziert den Kopf auf den Bildschirm und
+-- schreibt "BLIND 7.3s" darueber. Laeuft auf Heartbeat, damit das Schild am Ziel klebt.
+local function startObscuroVisuals()
+  if g.SB_OBSC_VIS then return end
+  local parent
+  local okH, h = pcall(function() return gethui and gethui() end)
+  if okH and typeof(h) == "Instance" then parent = h end
+  if not parent then local ok2, c = pcall(function() return game:GetService("CoreGui") end); if ok2 then parent = c end end
+  if not parent then parent = lp:WaitForChild("PlayerGui") end
+  local old = parent:FindFirstChild("SB_ObscuroESP"); if old then old:Destroy() end
+  local espGui = Instance.new("ScreenGui")
+  espGui.Name = "SB_ObscuroESP"; espGui.ResetOnSpawn = false; espGui.IgnoreGuiInset = true
+  espGui.DisplayOrder = 501; espGui.Enabled = not g.SB_STREAMPROOF
+  espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; espGui.Parent = parent
+  local tags = {}                                   -- [Name] = TextLabel
+  g.SB_OBSC_VIS = RunService.Heartbeat:Connect(function()
+    espGui.Enabled = not g.SB_STREAMPROOF
+    local cam = workspace.CurrentCamera
+    local dur = tonumber(g.SB_OBSC_TIME) or 10
+    local now = tick()
+    for who, lbl in pairs(tags) do                  -- abgelaufene/fehlende wieder abraeumen
+      local t = g.SB_OBSC_HITS[who]
+      if not g.SB_OBSC or not t or (now - t) >= dur then lbl:Destroy(); tags[who] = nil end
+    end
+    if not (g.SB_OBSC and cam) then return end
+    for who, t in pairs(g.SB_OBSC_HITS) do
+      local left = dur - (now - t)
+      if left > 0 then
+        local pl = Players:FindFirstChild(who)
+        local ch = pl and pl.Character
+        local head = ch and (ch:FindFirstChild("Head") or ch:FindFirstChild("HumanoidRootPart"))
+        if head then
+          local lbl = tags[who]
+          if not lbl or not lbl.Parent then
+            lbl = Instance.new("TextLabel")
+            lbl.BackgroundTransparency = 1; lbl.Font = Enum.Font.GothamBold; lbl.TextSize = 14
+            lbl.TextStrokeTransparency = 0.3; lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+            lbl.Size = UDim2.fromOffset(220, 16); lbl.Parent = espGui
+            tags[who] = lbl
+          end
+          local sp, onScreen = cam:WorldToViewportPoint(head.Position + Vector3.new(0, 2.6, 0))
+          if onScreen and sp.Z > 0 then
+            lbl.Position = UDim2.fromOffset(sp.X - 110, sp.Y - 8)
+            lbl.Text = string.format("BLIND %.1fs", left)
+            lbl.TextColor3 = (who == lp.Name) and Color3.fromRGB(255, 170, 90) or Color3.fromRGB(120, 195, 255)
+            lbl.Visible = true
+          else lbl.Visible = false end
+        end
+      end
+    end
   end)
+  table.insert(g.SB_CONNS, g.SB_OBSC_VIS)
 end
 
 -- Liste der aktuell (vermutlich) Geblendeten, laengster Rest zuerst
@@ -2528,7 +2609,7 @@ local function cfgApplyModules(mods)
   if g.SB_CFG_MODULES then
     g.SB_AIM = on("SB_AIM");       if g.SB_AIM then startSelector(); startAim() end
     g.SB_SHIELD = on("SB_SHIELD"); if g.SB_SHIELD then hookShield() end
-    g.SB_OBSC = on("SB_OBSC");     if g.SB_OBSC then hookObscuro() end
+    g.SB_OBSC = on("SB_OBSC");     if g.SB_OBSC then hookObscuro(); startObscuroVisuals() end
     g.SB_CLASH = on("SB_CLASH");   if g.SB_CLASH then startClashAuto() end
     g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto(); startSealAttune() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
@@ -3203,7 +3284,7 @@ local function mountGui()
     function(v) g.SB_SHIELD = v; if v then hookShield() end end)
   addModule(combat, "See-Obscuro",
     function() return g.SB_OBSC end,
-    function(v) g.SB_OBSC = v; if v then hookObscuro() end end,
+    function(v) g.SB_OBSC = v; if v then hookObscuro(); startObscuroVisuals() end end,
     function(sf)
       makeSliderW(sf, 1, "Anzeigedauer", 1, 20, function() return tonumber(g.SB_OBSC_TIME) or 10 end,
         function(v) g.SB_OBSC_TIME = math.floor(v * 10 + 0.5) / 10 end,
@@ -3656,6 +3737,7 @@ local function mountGui()
       if g.SB_SHOT and not g.SB_SHOT_LOOP then pcall(startShotgun) end
       if g.SB_DEWAND and not g.SB_DEWAND_LOOP then pcall(startDeWand) end
       if g.SB_OBSC and not g.SB_OBSC_HOOKED then pcall(hookObscuro) end
+      if g.SB_OBSC and not g.SB_OBSC_VIS then pcall(startObscuroVisuals) end
       task.wait(0.2)
     end
   end)
