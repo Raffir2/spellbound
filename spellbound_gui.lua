@@ -1873,11 +1873,11 @@ end
 
 --=============== COMBO (Taste M): unten festnageln, oben normal abschiessen ===============--
 -- Umgekehrte Reihenfolge zum Snipe: erst TP unter das Ziel und von dort den Halte-Spell
--- (default "locomotor mortis" -> stunned) nach oben, sofort zurueck an den Startpunkt und DANN
+-- (default "petrificus totalus" -> immobilized + platformstand) nach oben, sofort zurueck an den Startpunkt und DANN
 -- ganz normal von der eigenen Position mit dem naechsten Safe-Combat-Spell nachlegen.
 -- Fuer alle anderen sieht nur der zweite, normale Schuss nach einem Angriff aus; der Stun
 -- davor kommt scheinbar aus dem Nichts und das Ziel steht fuer den Nachschlag still.
-g.SB_LOCK_SPELL = g.SB_LOCK_SPELL or resolveSpell("locomotor mortis")
+g.SB_LOCK_SPELL = g.SB_LOCK_SPELL or resolveSpell("petrificus totalus")
 g.SB_LOCK_DEPTH = tonumber(g.SB_LOCK_DEPTH) or 15      -- Studs unter dem Ziel
 g.SB_LOCK_DELAY = tonumber(g.SB_LOCK_DELAY) or 0.05    -- Wartezeit nach dem TP vor dem Cast
 g.SB_LOCK_GAP   = tonumber(g.SB_LOCK_GAP)   or 0.05    -- Pause daheim vor dem normalen Schuss
@@ -1899,7 +1899,7 @@ local function doLockCombo()
     local home       = hrp.CFrame
     local carveKey   = nil
     local holdAnchor = false
-    local lockSpell  = resolveSpell(g.SB_LOCK_SPELL or "locomotor mortis")
+    local lockSpell  = resolveSpell(g.SB_LOCK_SPELL or "petrificus totalus")
 
     -- 1) UNTER das Ziel und den Halte-Spell nach oben feuern
     pcall(function()
