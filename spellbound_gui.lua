@@ -2327,6 +2327,7 @@ g.SB_LOCK_DEPTH = tonumber(g.SB_LOCK_DEPTH) or 15      -- Studs unter dem Ziel
 g.SB_LOCK_DELAY = tonumber(g.SB_LOCK_DELAY) or 0.05    -- Wartezeit nach dem TP vor dem Cast
 g.SB_LOCK_GAP   = tonumber(g.SB_LOCK_GAP)   or 0.05    -- Pause daheim vor dem normalen Schuss
 if g.SB_LOCK_CARVE == nil then g.SB_LOCK_CARVE = true end
+if g.SB_LOCK_FOLLOW == nil then g.SB_LOCK_FOLLOW = true end  -- aus: kein zusaetzlicher "normaler" Tarn-Schuss von daheim
 
 local function doLockCombo()
   if g.SB_LOCK_BUSY or g.SB_SNIPE_BUSY then return end
@@ -2403,6 +2404,12 @@ local function doLockCombo()
     end
 
     -- 3) NORMALER Schuss von daheim: naechster Slot der Safe-Combat-Rotation
+    --    (abschaltbar: dann bleibt es beim Halte-Spell, kein zusaetzlicher Tarn-Schuss)
+    if g.SB_LOCK_FOLLOW == false then
+      g.SB_LOCK_COUNT = (tonumber(g.SB_LOCK_COUNT) or 0) + 1
+      g.SB_LOCK_BUSY = false
+      return
+    end
     task.wait(tonumber(g.SB_LOCK_GAP) or 0.05)
     pcall(function()
       if not (root.Parent and hum.Health > 0) then
@@ -2976,7 +2983,7 @@ local CFG_KEYS = {
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
-  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
+  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE", "SB_LOCK_FOLLOW",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_OBSC_TIME", "SB_OBSC_CONJ",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
@@ -3922,7 +3929,9 @@ local function mountGui()
         function(v) return string.format("%.2fs", v) end)
       makeToggleW(sf, 5, "Terrain-Schacht", function() return g.SB_LOCK_CARVE ~= false end,
         function() g.SB_LOCK_CARVE = not (g.SB_LOCK_CARVE ~= false) end)
-      local lb = Instance.new("TextLabel"); lb.Size = UDim2.new(1, -12, 0, 46); lb.LayoutOrder = 6
+      makeToggleW(sf, 6, "Extra-Schuss von daheim", function() return g.SB_LOCK_FOLLOW ~= false end,
+        function() g.SB_LOCK_FOLLOW = not (g.SB_LOCK_FOLLOW ~= false) end)
+      local lb = Instance.new("TextLabel"); lb.Size = UDim2.new(1, -12, 0, 46); lb.LayoutOrder = 7
       lb.BackgroundTransparency = 1; lb.Font = Enum.Font.Gotham; lb.TextSize = 11
       lb.TextColor3 = Color3.fromRGB(150, 150, 170); lb.TextWrapped = true
       lb.TextXAlignment = Enum.TextXAlignment.Left; lb.Parent = sf
