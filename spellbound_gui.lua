@@ -1470,15 +1470,59 @@ end
 --   Blood Seal: Seal-NPCs (Attribut IsBloodSealNpc + BloodSealId) der Reihe nach killen -
 --               unter den NPC, casten bis er tot ist. Schaden UND Kills zaehlen zum Beitrag.
 --               Keine NPCs gerade -> am Seal warten.
---   Crown Seal: in Reichweite am Leben bleiben (Kontrollzeit zaehlt) -> verankert halten.
+--   Crown Seal: in Reichweite am Leben bleiben (Kontrollzeit zaehlt) -> festgepinnt halten.
 -- Bei "Sealed" geht es schon vor dem Oeffnen hin (Ankuendigung: vor Active da sein).
--- Gehalten wird standardmaessig UNTER dem Seal (unsichtbar, schwer zu treffen). Zaehlt der
+-- Gehalten wird OHNE Anchored (sonst sieht der Server die Position nicht, s. sealPin),
+-- standardmaessig UNTER dem Seal (unsichtbar, schwer zu treffen). Zaehlt der
 -- Server das nach 3s nicht als "In Range", wird fuer diesen Seal an der Oberflaeche gehalten.
 -- Startet bewusst NIE automatisch aus der Config.
 g.SB_SEALFARM_DELAY = tonumber(g.SB_SEALFARM_DELAY) or 0.25   -- Pause zwischen zwei Casts
 g.SB_SEALFARM_MAXCASTS = tonumber(g.SB_SEALFARM_MAXCASTS) or 8 -- max. Casts pro NPC, dann weiter
 if g.SB_SEALFARM_RETURN == nil then g.SB_SEALFARM_RETURN = true end
 if g.SB_SEALFARM_UNDER  == nil then g.SB_SEALFARM_UNDER = true end   -- unter dem Seal halten
+
+-- Halten OHNE Anchored: gemessen meldet ein verankertes HRP dem Server seine Position nicht -
+-- am selben Punkt beim Seal war es verankert 8/8 "Not Nearby", unverankert 8/8 "In Range".
+-- Reichweite zaehlt beim Seal serverseitig, also wird hier per Heartbeat festgepinnt
+-- (CFrame + Geschwindigkeit 0); client-eigene Physik repliziert zum Server.
+local sealPinConn
+local function sealPin(pos)
+  local ch  = lp.Character
+  local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+  if not hrp then return false end
+  if hrp.Anchored then hrp.Anchored = false end
+  local rot = hrp.CFrame - hrp.CFrame.Position     -- Blickrichtung beibehalten
+  g.SB_SEALPIN = CFrame.new(pos) * rot
+  hrp.CFrame = g.SB_SEALPIN
+  hrp.AssemblyLinearVelocity = Vector3.zero
+  if not sealPinConn then
+    sealPinConn = RunService.Heartbeat:Connect(function()
+      local pin = g.SB_SEALPIN
+      local c = lp.Character
+      local h = c and c:FindFirstChild("HumanoidRootPart")
+      if not (pin and h) then return end
+      if h.Anchored then h.Anchored = false end
+      if (h.Position - pin.Position).Magnitude > 0.5 then h.CFrame = pin end
+      h.AssemblyLinearVelocity = Vector3.zero
+    end)
+    table.insert(g.SB_CONNS, sealPinConn)
+  end
+  return true
+end
+local function sealUnpin()
+  g.SB_SEALPIN = nil
+  if sealPinConn then pcall(function() sealPinConn:Disconnect() end); sealPinConn = nil end
+end
+
+-- Boden an einer Stelle (Raycast von oben, eigener Charakter ausgenommen). Trifft auch
+-- Daecher - dort oben zaehlte es beim Test ebenfalls als "In Range".
+local function groundAt(pos)
+  local params = RaycastParams.new()
+  params.FilterType = Enum.RaycastFilterType.Exclude
+  params.FilterDescendantsInstances = { lp.Character }
+  local hit = workspace:Raycast(pos + Vector3.new(0, 150, 0), Vector3.new(0, -500, 0), params)
+  return hit and hit.Position or pos
+end
 
 -- lebende Blood-NPCs des aktiven Seals, naechster zuerst
 local function bloodTargets(st)
@@ -1508,7 +1552,7 @@ local function bloodKillOne(t)
   while g.SB_SEALFARM and t.m.Parent and t.hum.Health > 0 and casts < maxCasts do
     local depth = tonumber(g.SB_FARM_DEPTH) or 15
     local spot  = t.root.Position - Vector3.new(0, depth, 0)
-    if not farmTeleport(spot) then break end
+    if not sealPin(spot) then break end              -- unverankert: Server sieht die Position
     if g.SB_FARM_CARVE and not g.SB_TERR_WIPED then carveShaft(spot, t.root.Position) end
     task.wait(tonumber(g.SB_FARM_DELAY) or 0.25)
     if not (t.m.Parent and t.hum.Health > 0) then break end
@@ -1554,8 +1598,8 @@ local function startSealFarm()
           local center = loc:GetPivot().Position
           local under  = g.SB_SEALFARM_UNDER and surfaceFor ~= st.sealId
           local depth  = tonumber(g.SB_FARM_DEPTH) or 15
-          local spot   = under and (center - Vector3.new(0, depth, 0)) or (center + Vector3.new(0, 3, 0))
-          if farmTeleport(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
+          local spot   = under and (center - Vector3.new(0, depth, 0)) or (groundAt(center) + Vector3.new(0, 3.5, 0))
+          if sealPin(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
             carveShaft(spot, center)                 -- Schacht nach oben, damit Casts rauskommen
           end
           if st.sealState == "Active" then
@@ -1580,6 +1624,7 @@ local function startSealFarm()
     end
     -- Aufraeumen: Schaechte zu (sonst faellt man beim Entankern), dann heim und entankern
     g.SB_SEAL = sealWasOn
+    sealUnpin()
     pcall(restoreMap)
     local hrp = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     if hrp then
