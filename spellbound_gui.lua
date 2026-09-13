@@ -36,6 +36,118 @@ local lp         = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local Http       = game:GetService("HttpService")
 local g = getgenv()
 
+-- === Konsolen-Schutz: Projektil-Modul des Spiels gegen tote Projektile absichern ===
+-- In den Roblox-Logs tauchten Fehler aus shared.modules.projectileV3 auf (kein Stack von
+-- uns, aber durch viele Casts deutlich haeufiger):
+--   projectileV3:246 "attempt to index nil with 'particles'" - stop() schaltet Partikel per
+--     task.delay ab; laeuft dazwischen destroy() (table.clear), ist .projectile weg.
+--   projectileV3.edit:10 "attempt to index nil with 'main'" - spells-e4 bekommt vom Server
+--     ein Treffer-Update und ruft setPosition auf einem schon zerstoerten Projektil auf.
+-- Nach destroy() sind .projectile UND .data geloescht, also kann jede spaetere Methode
+-- knallen. Das Modul nutzt u1.__index = u1, ein Methoden-Tausch gilt fuer alle Projektile.
+-- Mutatoren tun bei toten Projektilen nichts (das Original waere dort ohnehin abgebrochen),
+-- Getter liefern harmlose Werte statt nil (Aufrufer rechnen damit weiter), stop() wird
+-- mit Pruefung im verzoegerten Callback nachgebaut. Einmalig + idempotent, alles in pcall.
+pcall(function()
+  local RSg = game:GetService("ReplicatedStorage")
+  local mod = RSg:FindFirstChild("shared") and RSg.shared:FindFirstChild("modules")
+              and RSg.shared.modules:FindFirstChild("projectileV3")
+  if not mod then return end
+  local ok, P3 = pcall(require, mod)
+  if not ok or type(P3) ~= "table" or rawget(P3, "__sbGuarded") then return end
+
+  local function hasData(self) return type(self) == "table" and type(rawget(self, "data")) == "table" end
+  local function alive(self)
+    if not hasData(self) then return false end
+    local pr = rawget(self, "projectile")
+    return type(pr) == "table" and pr.main ~= nil
+  end
+
+  -- Methoden, die .projectile.main bzw. .data brauchen: bei totem Projektil still nichts tun
+  for _, name in ipairs({ "setPosition", "setCFrame", "setDirection", "changeDirection", "reflect",
+                          "toggleEffects", "togglePassingSound", "disableAllButTrails", "clearTrails",
+                          "stopSpringCFrame", "springCFrame", "travel" }) do
+    local orig = rawget(P3, name)
+    if type(orig) == "function" then
+      P3[name] = function(self, ...)
+        if not alive(self) then return end
+        return orig(self, ...)
+      end
+    end
+  end
+  -- nur .data noetig
+  for _, name in ipairs({ "setOrigin" }) do
+    local orig = rawget(P3, name)
+    if type(orig) == "function" then
+      P3[name] = function(self, ...)
+        if not hasData(self) then return end
+        return orig(self, ...)
+      end
+    end
+  end
+
+  -- Getter: nie nil zurueckgeben
+  local oGetDir, oGetPos, oPast = rawget(P3, "getDirection"), rawget(P3, "getPosition"), rawget(P3, "isPastEndPosition")
+  if type(oGetDir) == "function" then
+    P3.getDirection = function(self, ...)
+      if not hasData(self) or typeof(self.data.direction) ~= "Vector3" then return Vector3.new(0, 0, -1) end
+      return oGetDir(self, ...)
+    end
+  end
+  if type(oGetPos) == "function" then
+    P3.getPosition = function(self, ...)
+      local d = hasData(self) and self.data
+      if not d or typeof(d.origin) ~= "Vector3" or type(d.speed) ~= "number" or type(d.startCastTime) ~= "number" then
+        return Vector3.zero
+      end
+      return oGetPos(self, ...)
+    end
+  end
+  if type(oPast) == "function" then
+    P3.isPastEndPosition = function(self, ...)
+      if not hasData(self) then return false, 0 end
+      return oPast(self, ...)
+    end
+  end
+
+  -- stop(): Original ruft im task.delay .projectile.particles auf -> mit Pruefung nachgebaut
+  if type(rawget(P3, "stop")) == "function" then
+    P3.stop = function(self, delayTime, clearTrails)
+      if not alive(self) then return end
+      local main = self.projectile.main
+      pcall(function() main.Passing:Stop() end)
+      pcall(function() main.Center.Aura.Enabled = false end)
+      self.data.traveling = false
+      task.delay(delayTime or 0, function()
+        local pr = type(self) == "table" and rawget(self, "projectile")
+        if type(pr) == "table" then
+          if type(pr.particles) == "table" then
+            for _, v in pr.particles do pcall(function() v.Enabled = false end) end
+          end
+          if type(pr.trails) == "table" then
+            for _, v in pr.trails do
+              pcall(function() v.Enabled = false; if clearTrails then v:Clear() end end)
+            end
+          end
+        end
+        local sig = type(self) == "table" and rawget(self, "stopped")
+        if sig then pcall(function() sig:Fire(false) end) end
+      end)
+    end
+  end
+
+  -- destroy(): ein zweiter Aufruf nach table.clear hat kein .data mehr
+  local oDestroy = rawget(P3, "destroy")
+  if type(oDestroy) == "function" then
+    P3.destroy = function(self, ...)
+      if not hasData(self) then return end
+      return oDestroy(self, ...)
+    end
+  end
+
+  P3.__sbGuarded = true
+end)
+
 -- === Re-Execute-Cleanup: altes vollstaendig killen, keine Zombies ===
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
