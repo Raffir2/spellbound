@@ -1637,10 +1637,21 @@ local function startSealFarm()
           -- am Seal halten: unter dem Zentrum, ausser dieser Seal zaehlt das nicht als Reichweite
           g.SB_FARM_TARGET = nil
           local center, zone = sealHoldPoint(loc)
-          local under  = g.SB_SEALFARM_UNDER and surfaceFor ~= st.sealId
+          -- Clash Seal: normal auf dem Boden stehen (kein Schweben, nicht unter der Map) -
+          -- einmal auf den Boden in der Zone setzen, dann Pin loesen und die Physik machen
+          -- lassen; nur bei mehr als 12 Studs Abdrift wieder hinsetzen.
+          local isClash = st.sealType == "Clash Seal"
+          local under  = (not isClash) and g.SB_SEALFARM_UNDER and surfaceFor ~= st.sealId
           local depth  = tonumber(g.SB_FARM_DEPTH) or 15
           local spot   = under and (center - Vector3.new(0, depth, 0)) or groundInZone(center, zone)
-          if sealPin(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
+          if isClash then
+            local hrpNow = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
+            if not hrpNow or hrpNow.Anchored or (hrpNow.Position - spot).Magnitude > 12 then
+              sealPin(spot)
+              task.wait(0.15)
+            end
+            g.SB_SEALPIN = nil                         -- Pin aus: steht auf dem Boden
+          elseif sealPin(spot) and under and g.SB_FARM_CARVE and not g.SB_TERR_WIPED then
             carveShaft(spot, center)                 -- Schacht nach oben, damit Casts rauskommen
           end
           if st.sealState == "Active" then
