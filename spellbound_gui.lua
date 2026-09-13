@@ -815,10 +815,30 @@ local function wheelSelect(spell)
   if not input then return false, "nicht im Rad" end
   if UIS:GetFocusedTextBox() then return false, "Textfeld aktiv" end
   if lp:GetAttribute("Client_IsClashing") == true then return false, "im Clash" end
-  pcall(function() keypress(0x52) end)                     -- R antippen: Rad oeffnen
-  task.wait(0.03)
-  pcall(function() keyrelease(0x52) end)
-  task.wait(0.08 + math.random() * 0.06)
+  -- R antippen oeffnet das Rad ueber den Handler des Spiels. keypress geht aber an das AKTIVE
+  -- Fenster: ist Roblox nicht im Vordergrund (isrbxactive() == false), kommt die Taste nie an
+  -- (gemessen: Spell geladen, Rad blieb unsichtbar). Dann das Rad direkt ueber das Modul des
+  -- Spiels oeffnen - derselbe Aufruf, den der R-Handler intern macht (refitGui + openWheel).
+  local cont = slot.Parent and slot.Parent.Parent
+  local active = true
+  pcall(function() if isrbxactive then active = isrbxactive() end end)
+  if active then
+    pcall(function() keypress(0x52) end)
+    task.wait(0.03)
+    pcall(function() keyrelease(0x52) end)
+    task.wait(0.1)
+  end
+  if not (cont and cont:IsA("GuiObject") and cont.Visible) then
+    pcall(function()
+      local sw = lp.PlayerScripts:FindFirstChild("spellWheel", true)
+      local wr = sw and require(sw:FindFirstChild("wheelRenderer"))
+      if wr and wr.openWheel then
+        if wr.refitGui then wr.refitGui() end
+        wr.openWheel(0, Enum.KeyCode.R)
+      end
+    end)
+  end
+  task.wait(0.06 + math.random() * 0.06)
   local okE, enters = pcall(getconnections, input.MouseEnter)
   for _, c in ipairs(okE and enters or {}) do pcall(function() c:Fire() end) end
   task.wait(math.max(tonumber(g.SB_ULTRA_HOVER) or 0.14, 0.03) * (0.85 + math.random() * 0.3))
