@@ -1777,24 +1777,32 @@ local function farmTargets()
   local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
   local me    = myHRP and myHRP.Position or Vector3.zero
   local list  = {}
+  -- Nur-Ziel (z.B. eigener Zweit-Account): dann ausschliesslich diesen Spieler farmen,
+  -- Freunde-/Ausnahme-Listen gelten fuer ihn nicht
+  local only = type(g.SB_FARM_ONLY) == "string" and g.SB_FARM_ONLY ~= "" and g.SB_FARM_ONLY:lower() or nil
   for _, pl in ipairs(Players:GetPlayers()) do
-    if pl ~= lp then
+    if pl ~= lp and (not only or pl.Name:lower() == only) then
       local ch   = pl.Character
       local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
       local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
       if root and hum and hum.Health > 0 then
         local skip = false
-        if g.SB_FARM_EXEMPT_OK then
+        if only then
+          if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
+          if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
+        elseif g.SB_FARM_EXEMPT_OK then
           local fid = playerFactionId(pl)
           if g.SB_AIM_EXEMPT[pl.Name] then skip = true end
           if fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name] then skip = true end
         end
-        if isFriend(pl) then skip = true end
-        if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
-        if g.SB_FARM_SKIP_AIR and isAirborne(pl) then skip = true end
-        if g.SB_FARM_SKIP_CLASH and isInClash(pl) then skip = true end
-        if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
-        if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
+        if not only then
+          if isFriend(pl) then skip = true end
+          if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
+          if g.SB_FARM_SKIP_AIR and isAirborne(pl) then skip = true end
+          if g.SB_FARM_SKIP_CLASH and isInClash(pl) then skip = true end
+          if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
+          if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
+        end
       end
     end
   end
