@@ -1346,7 +1346,44 @@ end
 -- ob der Pointer im Arc ist, und druecken exakt beim Eintritt Space (VirtualInputManager
 -- = legitimer Input-Pfad: spielt Success, sendet echtes moveClash-Packet, rueckt vor).
 -- armed-Guard = genau ein Fire pro Arc-Eintritt -> nie der 1s-Miss-Stun.
+if g.SB_CLASH_INSTANT == nil then g.SB_CLASH_INSTANT = false end   -- Sofort-Sieg: standardmaessig aus
+
+-- Sofort-Sieg: der Server schickt beim Clash-Start den Seed (toggleSpellsClashing.seed). Die Boegen
+-- entstehen daraus exakt wie in ArcScribe.next (Random.new(seed): Groesse, Start, Bonus-Start,
+-- Bonus-Groesse). Wir senden direkt fuer jeden Bogen ein moveClash mit einem Winkel in der Bogenmitte,
+-- statt auf den Zeiger zu warten -> Clash in ~1s gewonnen (live gemessen 0.87s).
+-- Listener nur einmal pro Session (packets.listen laesst sich nicht trennen), liest die Flags live.
+local function hookClashInstant()
+  if g.SB_CLASH_INSTANT_HOOKED or not (okPk and packets and packets.toggleSpellsClashing) then return end
+  g.SB_CLASH_INSTANT_HOOKED = true
+  packets.toggleSpellsClashing.listen(function(p)
+    if type(p) ~= "table" then return end
+    if p.shouldClash ~= true then g.SB_CLASH_BURST_UNTIL = 0; return end
+    if not (g.SB_CLASH and g.SB_CLASH_INSTANT and p.seed) then return end
+    g.SB_CLASH_RUN = (tonumber(g.SB_CLASH_RUN) or 0) + 1
+    local run = g.SB_CLASH_RUN
+    local gap = 0.05
+    g.SB_CLASH_BURST_UNTIL = os.clock() + 41 * gap + 0.5   -- solange keine Space-Druecke vom Arc-Loop
+    task.spawn(function()
+      pcall(function()
+        local rng = Random.new(p.seed)
+        for i = 0, 40 do
+          if g.SB_CLASH_RUN ~= run or not g.SB_CLASH or lp:GetAttribute("Client_IsClashing") == false then break end
+          local size  = rng:NextInteger(30, 60)
+          local start = rng:NextInteger(-180, 180)
+          rng:NextInteger(-180, 180); rng:NextInteger(15, 30)          -- Bonusbogen (Reihenfolge wie ArcScribe)
+          packets.moveClash.send({ arcIndex = i, clientAngle = ((start + size / 2) % 360 + 360) % 360 })
+          g.SB_CLASH_HITS = (tonumber(g.SB_CLASH_HITS) or 0) + 1
+          task.wait(gap)
+        end
+      end)
+      if g.SB_CLASH_RUN == run then g.SB_CLASH_BURST_UNTIL = 0 end   -- Clash noch offen? normaler Loop uebernimmt
+    end)
+  end)
+end
+
 local function startClashAuto()
+  hookClashInstant()
   if g.SB_CLASH_LOOP then return end
   g.SB_CLASH_LOOP = true
   local VIM = game:GetService("VirtualInputManager")
@@ -1358,6 +1395,7 @@ local function startClashAuto()
   end
   local clashConn = RunService.Heartbeat:Connect(function()
     if not g.SB_CLASH then armed = true; return end
+    if g.SB_CLASH_INSTANT and os.clock() < (tonumber(g.SB_CLASH_BURST_UNTIL) or 0) then return end  -- Sofort-Sieg sendet gerade
     local Clashing = pg:FindFirstChild("Clashing")
     if not Clashing or not Clashing.Enabled or lp:GetAttribute("Client_IsClashing") ~= true then
       armed = true; return
@@ -2991,7 +3029,7 @@ local CFG_KEYS = {
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
   "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
-  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE", "SB_LOCK_FOLLOW",
+  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE", "SB_LOCK_FOLLOW", "SB_CLASH_INSTANT",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_OBSC_TIME", "SB_OBSC_CONJ",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
@@ -3801,7 +3839,12 @@ local function mountGui()
     end)
   addModule(combat, "Auto-Clash",
     function() return g.SB_CLASH end,
-    function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
+    function(v) g.SB_CLASH = v; if v then startClashAuto() end end,
+    function(sf)
+      makeToggleW(sf, 1, "Sofort-Sieg", function() return g.SB_CLASH_INSTANT == true end,
+        function() g.SB_CLASH_INSTANT = not (g.SB_CLASH_INSTANT == true); if g.SB_CLASH then hookClashInstant() end end)
+      addInfo(sf, 2, "Sofort-Sieg: rechnet alle Boegen aus dem Clash-Seed vor und sendet die Treffer direkt (~1s pro Clash) statt auf den Zeiger zu warten. Faellt ins normale Auto-Clash zurueck, falls der Clash danach noch laeuft. Sehr auffaellig - standardmaessig aus.", 64)
+    end)
   addModule(combat, "Auto-Dodge",
     function() return g.SB_DODGE end,
     function(v) g.SB_DODGE = v; if v then g.SB_DODGE_SKIPACC = 0; hookDodge() end end,
