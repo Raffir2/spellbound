@@ -2558,7 +2558,7 @@ local CFG_KEYS = {
   "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
-  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE", "SB_SNIPE_LOBO", "SB_SNIPE_LOBO_T", "SB_SNIPE_LOBO_DIST", "SB_SNIPE_SPELL",
+  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE", "SB_SNIPE_LOBO", "SB_SNIPE_LOBO_T", "SB_SNIPE_LOBO_DIST", "SB_SNIPE_SPELL", "SB_CLICKTP",
   "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_OBSC_TIME", "SB_OBSC_CONJ",
@@ -3567,6 +3567,9 @@ local function mountGui()
     end)
   addAction(util, function() return g.SB_APPA_PENDING and "Appa geladen - Klick castet" or "Appa laden" end,
     function() g.SB_APPA_PENDING = true; disarmSpell(); startSelector() end)
+  addModule(util, "Ctrl-Click-TP",
+    function() return g.SB_CLICKTP == true end,
+    function(v) g.SB_CLICKTP = v end)
   addModule(util, "Box-ESP",
     function() return g.SB_TEAM_ESP end,
     function(v) g.SB_TEAM_ESP = v; if v then startVisuals() end end)
@@ -3809,6 +3812,27 @@ local function mountGui()
       arrayHolder.Position = UDim2.new(1, -6, 0, ins)
     end
   end
+
+  -- CTRL-CLICK-TP: Strg halten + Linksklick -> Charakter an den Mauspunkt (Blickrichtung bleibt).
+  table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
+    if gp or not g.SB_CLICKTP or i.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+    if not (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then return end
+    if g.SB_FARM or g.SB_SEALFARM or g.SB_SNIPE_BUSY or g.SB_LOCK_BUSY then return end
+    local ch  = lp.Character
+    local hrp = ch and ch:FindFirstChild("HumanoidRootPart")
+    local cam = workspace.CurrentCamera
+    if not (hrp and cam) then return end
+    local mp  = UIS:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(mp.X, mp.Y)
+    local rp  = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = { ch }
+    local hit = workspace:Raycast(ray.Origin, ray.Direction * 2000, rp)
+    if not hit then return end
+    local rot = hrp.CFrame - hrp.CFrame.Position
+    pcall(function() ch:PivotTo(CFrame.new(hit.Position + Vector3.new(0, 3, 0)) * rot) end)
+    hrp.AssemblyLinearVelocity = Vector3.zero
+  end))
 
   -- Alle Hotkeys kommen aus g.SB_KEYS (Client-Panel -> "Hotkeys"), nichts ist fest verdrahtet.
   table.insert(g.SB_CONNS, UIS.InputBegan:Connect(function(i, gp)
