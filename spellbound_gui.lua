@@ -3398,15 +3398,7 @@ local function mountGui()
         function(v) return string.format("%.2fs", v) end)
       makeToggleW(sf, 3, "Terrain-Blase", function() return g.SB_SNIPE_CARVE ~= false end,
         function() g.SB_SNIPE_CARVE = not (g.SB_SNIPE_CARVE ~= false) end)
-      makeToggleW(sf, 5, "Lobotomy-Mode", function() return g.SB_SNIPE_LOBO == true end,
-        function() g.SB_SNIPE_LOBO = not (g.SB_SNIPE_LOBO == true) end)
-      makeSliderW(sf, 6, "Lobo-Zeit", 0.2, 2, function() return tonumber(g.SB_SNIPE_LOBO_T) or 0.6 end,
-        function(v) g.SB_SNIPE_LOBO_T = math.floor(v * 10 + 0.5) / 10 end,
-        function(v) return string.format("%.1fs", v) end)
-      makeSliderW(sf, 7, "Lobo-Abstand", 3, 20, function() return tonumber(g.SB_SNIPE_LOBO_DIST) or 6 end,
-        function(v) g.SB_SNIPE_LOBO_DIST = math.floor(v + 0.5) end,
-        function(v) return math.floor(v + 0.5) .. " Studs" end)
-      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 8
+      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 4
       sn.BackgroundTransparency = 1; sn.Font = Enum.Font.Gotham; sn.TextSize = 11
       sn.TextColor3 = Color3.fromRGB(150, 150, 170); sn.TextWrapped = true
       sn.TextXAlignment = Enum.TextXAlignment.Left; sn.Parent = sf
@@ -3416,6 +3408,18 @@ local function mountGui()
           .. "zweiter Spell von unten, sofort zurueck. "
           .. "zuletzt: " .. tostring(g.SB_SNIPE_STATUS or "-") .. " (" .. (tonumber(g.SB_SNIPE_COUNT) or 0) .. ")"
       end
+    end)
+
+  addModule(troll, "Lobotomy",
+    function() return g.SB_SNIPE_LOBO == true end,
+    function(v) g.SB_SNIPE_LOBO = v end,
+    function(sf)
+      makeSliderW(sf, 1, "Lobo-Zeit", 0.2, 2, function() return tonumber(g.SB_SNIPE_LOBO_T) or 0.6 end,
+        function(v) g.SB_SNIPE_LOBO_T = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1fs", v) end)
+      makeSliderW(sf, 2, "Lobo-Abstand", 3, 20, function() return tonumber(g.SB_SNIPE_LOBO_DIST) or 6 end,
+        function(v) g.SB_SNIPE_LOBO_DIST = math.floor(v + 0.5) end,
+        function(v) return math.floor(v + 0.5) .. " Studs" end)
     end)
 
   addModule(troll, "De-Wand",
