@@ -1808,7 +1808,7 @@ local function doSnipe()
     local loboT     = tonumber(g.SB_SNIPE_LOBO_T) or 0.6
     local castDelay = lobo and loboT or (tonumber(g.SB_SNIPE_DELAY) or 0.05)
     local depth     = lobo and (tonumber(g.SB_SNIPE_LOBO_DIST) or 6) or (tonumber(g.SB_SNIPE_DEPTH) or 15)
-    local killSpell = nextSpell()
+    local killSpell = g.SB_SNIPE_SPELL or nextSpell()   -- fest gewaehlt, sonst Rotation
     local prep      = 0.07 + castDelay + depth / speedOf(killSpell)
     local waitT     = flight - prep
     if waitT > 0 then task.wait(waitT) end
@@ -2558,7 +2558,7 @@ local CFG_KEYS = {
   "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
-  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE", "SB_SNIPE_LOBO", "SB_SNIPE_LOBO_T", "SB_SNIPE_LOBO_DIST",
+  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE", "SB_SNIPE_LOBO", "SB_SNIPE_LOBO_T", "SB_SNIPE_LOBO_DIST", "SB_SNIPE_SPELL",
   "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_OBSC_TIME", "SB_OBSC_CONJ",
@@ -3398,7 +3398,10 @@ local function mountGui()
         function(v) return string.format("%.2fs", v) end)
       makeToggleW(sf, 3, "Terrain-Blase", function() return g.SB_SNIPE_CARVE ~= false end,
         function() g.SB_SNIPE_CARVE = not (g.SB_SNIPE_CARVE ~= false) end)
-      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 4
+      makeDropdownW(sf, 4, function() return "Kill-Spell: " .. tostring(g.SB_SNIPE_SPELL or "Rotation") end,
+        function() local t = getSpellList(); table.insert(t, 1, "Rotation"); return t end,
+        function(n) g.SB_SNIPE_SPELL = (n ~= "Rotation") and n or nil end)
+      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 5
       sn.BackgroundTransparency = 1; sn.Font = Enum.Font.Gotham; sn.TextSize = 11
       sn.TextColor3 = Color3.fromRGB(150, 150, 170); sn.TextWrapped = true
       sn.TextXAlignment = Enum.TextXAlignment.Left; sn.Parent = sf
