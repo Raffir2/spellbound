@@ -1779,6 +1779,7 @@ local function doSnipe()
     local home = hrp.CFrame
     local carveKey                                   -- gemerkt, damit das Loch wieder zugeht
     local holdAnchor = false                         -- daheim verankert bleiben, bis es zu ist
+    local loboPin                                    -- Lobotomy: Heartbeat-Halter neben dem Ziel
     local ROT = g.SB_SAFE_ROT or {}
     local function nextSpell()                       -- naechster Slot der Safe-Combat-Rotation
       local idx = tonumber(g.SB_ROT_IDX) or 1
@@ -1833,9 +1834,19 @@ local function doSnipe()
       else
         spot = root.Position - Vector3.new(0, depth, 0)
       end
-      if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
       if lobo then
-        pcall(function() hrp.CFrame = CFrame.lookAt(spot, Vector3.new(root.Position.X, spot.Y, root.Position.Z)) end)
+        -- NICHT verankern: ein verankertes HRP repliziert keine Position -> Gegner saehe dich
+        -- nicht. Stattdessen jeden Frame festhalten, dann sieht er dich neben sich stehen.
+        local pinCF = CFrame.lookAt(spot, Vector3.new(root.Position.X, spot.Y, root.Position.Z))
+        if hrp.Anchored then hrp.Anchored = false end
+        hrp.CFrame = pinCF
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        loboPin = RunService.Heartbeat:Connect(function()
+          if not hrp.Parent then return end
+          hrp.CFrame = pinCF
+          hrp.AssemblyLinearVelocity = Vector3.zero
+        end)
+      elseif not farmTeleport(spot) then return     -- verankert das HRP (sonst faellt man)
       elseif g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
         carveKey = carveShaft(spot, root.Position)   -- schmale Saeule, 12 Studs breit
       end
@@ -1865,6 +1876,7 @@ local function doSnipe()
     end
     -- Verankert heimkommen und ERST entankern, wenn der Schacht wieder zu ist - sonst
     -- faellt man durch das eigene Loch, falls man nah am Ziel stand.
+    if loboPin then loboPin:Disconnect(); loboPin = nil end
     holdAnchor = (carveKey ~= nil)
     goHome()
     task.spawn(function()
