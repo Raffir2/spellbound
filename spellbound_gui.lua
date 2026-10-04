@@ -36,141 +36,6 @@ local lp         = Players.LocalPlayer or Players.PlayerAdded:Wait()
 local Http       = game:GetService("HttpService")
 local g = getgenv()
 
--- === Konsolen-Schutz: Projektil-Modul des Spiels gegen tote Projektile absichern ===
--- In den Roblox-Logs tauchten Fehler aus shared.modules.projectileV3 auf (kein Stack von
--- uns, aber durch viele Casts deutlich haeufiger):
---   projectileV3:246 "attempt to index nil with 'particles'" - stop() schaltet Partikel per
---     task.delay ab; laeuft dazwischen destroy() (table.clear), ist .projectile weg.
---   projectileV3.edit:10 "attempt to index nil with 'main'" - spells-e4 bekommt vom Server
---     ein Treffer-Update und ruft setPosition auf einem schon zerstoerten Projektil auf.
--- Nach destroy() sind .projectile UND .data geloescht, also kann jede spaetere Methode
--- knallen. Das Modul nutzt u1.__index = u1, ein Methoden-Tausch gilt fuer alle Projektile.
--- Mutatoren tun bei toten Projektilen nichts (das Original waere dort ohnehin abgebrochen),
--- Getter liefern harmlose Werte statt nil (Aufrufer rechnen damit weiter), stop() wird
--- mit Pruefung im verzoegerten Callback nachgebaut. Einmalig + idempotent, alles in pcall.
-pcall(function()
-  local RSg = game:GetService("ReplicatedStorage")
-  local mod = RSg:FindFirstChild("shared") and RSg.shared:FindFirstChild("modules")
-              and RSg.shared.modules:FindFirstChild("projectileV3")
-  if not mod then return end
-  local ok, P3 = pcall(require, mod)
-  if not ok or type(P3) ~= "table" or rawget(P3, "__sbGuarded") then return end
-
-  local function hasData(self) return type(self) == "table" and type(rawget(self, "data")) == "table" end
-  local function alive(self)
-    if not hasData(self) then return false end
-    local pr = rawget(self, "projectile")
-    return type(pr) == "table" and pr.main ~= nil
-  end
-
-  -- Methoden, die .projectile.main bzw. .data brauchen: bei totem Projektil still nichts tun
-  for _, name in ipairs({ "setPosition", "setCFrame", "setDirection", "changeDirection", "reflect",
-                          "toggleEffects", "togglePassingSound", "disableAllButTrails", "clearTrails",
-                          "stopSpringCFrame", "springCFrame", "travel" }) do
-    local orig = rawget(P3, name)
-    if type(orig) == "function" then
-      P3[name] = function(self, ...)
-        if not alive(self) then return end
-        return orig(self, ...)
-      end
-    end
-  end
-  -- nur .data noetig
-  for _, name in ipairs({ "setOrigin" }) do
-    local orig = rawget(P3, name)
-    if type(orig) == "function" then
-      P3[name] = function(self, ...)
-        if not hasData(self) then return end
-        return orig(self, ...)
-      end
-    end
-  end
-
-  -- Getter: nie nil zurueckgeben
-  local oGetDir, oGetPos, oPast = rawget(P3, "getDirection"), rawget(P3, "getPosition"), rawget(P3, "isPastEndPosition")
-  if type(oGetDir) == "function" then
-    P3.getDirection = function(self, ...)
-      if not hasData(self) or typeof(self.data.direction) ~= "Vector3" then return Vector3.new(0, 0, -1) end
-      return oGetDir(self, ...)
-    end
-  end
-  if type(oGetPos) == "function" then
-    P3.getPosition = function(self, ...)
-      local d = hasData(self) and self.data
-      if not d or typeof(d.origin) ~= "Vector3" or type(d.speed) ~= "number" or type(d.startCastTime) ~= "number" then
-        return Vector3.zero
-      end
-      return oGetPos(self, ...)
-    end
-  end
-  if type(oPast) == "function" then
-    P3.isPastEndPosition = function(self, ...)
-      if not hasData(self) then return false, 0 end
-      return oPast(self, ...)
-    end
-  end
-
-  -- stop(): Original ruft im task.delay .projectile.particles auf -> mit Pruefung nachgebaut
-  if type(rawget(P3, "stop")) == "function" then
-    P3.stop = function(self, delayTime, clearTrails)
-      if not alive(self) then return end
-      local main = self.projectile.main
-      pcall(function() main.Passing:Stop() end)
-      pcall(function() main.Center.Aura.Enabled = false end)
-      self.data.traveling = false
-      task.delay(delayTime or 0, function()
-        local pr = type(self) == "table" and rawget(self, "projectile")
-        if type(pr) == "table" then
-          if type(pr.particles) == "table" then
-            for _, v in pr.particles do pcall(function() v.Enabled = false end) end
-          end
-          if type(pr.trails) == "table" then
-            for _, v in pr.trails do
-              pcall(function() v.Enabled = false; if clearTrails then v:Clear() end end)
-            end
-          end
-        end
-        local sig = type(self) == "table" and rawget(self, "stopped")
-        if sig then pcall(function() sig:Fire(false) end) end
-      end)
-    end
-  end
-
-  -- destroy(): ein zweiter Aufruf nach table.clear hat kein .data mehr
-  local oDestroy = rawget(P3, "destroy")
-  if type(oDestroy) == "function" then
-    P3.destroy = function(self, ...)
-      if not hasData(self) then return end
-      return oDestroy(self, ...)
-    end
-  end
-
-  P3.__sbGuarded = true
-end)
-
--- Treffer-Effekte: shared.modules.hitEffects.hit() laeuft im Treffer-Handler von spells-e4
--- VOR setPosition. Aufs Projektil greift es nur ueber getDirection() zu (oben abgesichert),
--- hat aber eine eigene Stolperstelle: FindFirstChild("Humanoid") und direkt danach
--- Humanoid.Health ohne Pruefung (Modell mit Charakter-Teilen, aber ohne Humanoid).
--- hit() laeuft deshalb in pcall; im Fehlerfall kommt { miss = true } zurueck - genau die
--- Form, die das Spiel selbst fuer einen Fehlschuss liefert, der Aufrufer kann damit umgehen.
-pcall(function()
-  local RSg = game:GetService("ReplicatedStorage")
-  local mod = RSg:FindFirstChild("shared") and RSg.shared:FindFirstChild("modules")
-              and RSg.shared.modules:FindFirstChild("hitEffects")
-  if not mod then return end
-  local ok, HE = pcall(require, mod)
-  if not ok or type(HE) ~= "table" or rawget(HE, "__sbGuarded") then return end
-  local orig = rawget(HE, "hit")
-  if type(orig) ~= "function" then return end
-  HE.hit = function(...)
-    local res = table.pack(pcall(orig, ...))
-    if res[1] then return table.unpack(res, 2, res.n) end
-    return { miss = true }
-  end
-  HE.__sbGuarded = true
-end)
-
 -- === Re-Execute-Cleanup: altes vollstaendig killen, keine Zombies ===
 -- laufende while-Loops beenden, alte Connections trennen, Toggles auf AUS.
 g.SB_AIM, g.SB_SHIELD, g.SB_CLASH = false, false, false
@@ -196,17 +61,6 @@ g.SB_OBSC_VIS = nil               -- alte Kopf-Anzeige loesen (GUI wird neu geba
 g.SB_FARM, g.SB_FARM_LOOP = false, false   -- Autofarm beim Reload aus
 g.SB_KD, g.SB_KD_LOOP = false, false       -- KD-Farm beim Reload aus
 g.SB_SEAL = false                          -- Auto-Seal beim Reload aus (Listener bleibt, prueft das Flag)
-g.SB_ULTRA, g.SB_ULTRA_LOOP = false, false -- Ultra Legit beim Reload aus
-g.SB_AIM_POINT = nil
--- Silent-Aim beim Reload aus: die alte Aim-Verbindung wird unten getrennt und SB_AIM_LOOP oben
--- zurueckgesetzt. Blieb SB_AIM an, zeigte der Toggle "an", ohne dass ein Loop lief, und der
--- letzte Hit klebte fest (Schuesse auf einen festen Punkt). Autoload/Toggle starten ihn sauber neu.
-g.SB_AIM = false
-pcall(function()                           -- evtl. vom Fake-Zeiger/Aim ueberschriebene Maus freigeben
-  local pmR = require(game:GetService("ReplicatedStorage").shared.modules.PlayerMouse):GetMouse()
-  rawset(pmR, "Position", nil)
-  rawset(pmR, "Hit", nil)
-end)
 g.SB_SEAL_ATTUNE_LOOP = false
 g.SB_SEALFARM, g.SB_SEALFARM_LOOP = false, false -- Seal-Farm beim Reload aus
 g.SB_NOFOG = false                         -- Nebel-Entferner: vorerst ausgebaut
@@ -266,47 +120,23 @@ local function isMine(f)
   end
   return false
 end
--- Tool-Upvalue einer WandClient-Closure (jede Wand hat ihren eigenen WandClient)
-local function toolOf(f)
-  local ok, ups = pcall(debug.getupvalues, f); if not ok then return nil end
-  for _, v in pairs(ups) do
-    if typeof(v) == "Instance" and v:IsA("Tool") then return v end
-  end
-end
--- Mehrere Waende (z.B. Silver Wand in der Hand + alte Wand im Backpack) haben je eigene Closures.
--- Frueher gewann die zuletzt gefundene -> oft die Backpack-Wand (equipped=false) -> nie Refs.
--- Jetzt pro Tool gruppieren und das Set der Wand IN DER HAND liefern.
 local function acquire()
-  local byTool = {}
+  local setLoadedSpell, fireSpell, state
   for _, f in ipairs(getgc(true)) do
     if type(f) == "function" then
       local ok, info = pcall(debug.getinfo, f)
-      if ok and info and type(info.source) == "string" and info.source:find("WandClient") and isMine(f) then
-        local tool = toolOf(f)
-        if tool then
-          local e = byTool[tool] or {}; byTool[tool] = e
-          if hasConsts(f, {"canLoadSpell","elderOnly","list"}) then
-            e.set = f
-            for _, v in pairs(debug.getupvalues(f)) do
-              -- frisch ausgeruestet ist der State nur {lumosEnabled, equipped} - casts kommt erst beim ersten Load
-              if type(v) == "table" and (rawget(v,"casts") ~= nil or rawget(v,"lumosEnabled") ~= nil) then e.state = v end
-            end
+      if ok and info and type(info.source) == "string" and info.source:find("WandClient") then
+        if hasConsts(f, {"canLoadSpell","elderOnly","list"}) and isMine(f) then
+          setLoadedSpell = f
+          for _, v in pairs(debug.getupvalues(f)) do
+            if type(v) == "table" and rawget(v,"casts") ~= nil and (rawget(v,"loadedSpell") ~= nil or rawget(v,"equipped") ~= nil) then state = v end
           end
-          if hasConsts(f, {"isClashing","lastCastTime"}) then e.fire = f end
         end
+        if hasConsts(f, {"isClashing","lastCastTime"}) and isMine(f) then fireSpell = f end
       end
     end
   end
-  local char = lp.Character
-  local best
-  for tool, e in pairs(byTool) do
-    if e.set and e.state and e.fire then
-      local inHand = char and tool:IsDescendantOf(char)
-      if inHand and e.state.equipped then return e.set, e.state, e.fire end
-      if not best or inHand then best = e end
-    end
-  end
-  if best then return best.set, best.state, best.fire end
+  return setLoadedSpell, state, fireSpell
 end
 
 --===== server-akzeptierter Cast (wie spellbound_spam: load->fire+localFire) =====--
@@ -407,21 +237,18 @@ local function fireSafeSlot(instant)
   local ROT = g.SB_SAFE_ROT
   local idx = g.SB_ROT_IDX
   local spell = ROT[idx] or ROT[1]
-  if not instant and not g.SB_ULTRA then           -- Ultra Legit laedt nur ueber das Spell-Rad
+  if not instant then
     state.casts = 0
     set(spell, true)
     task.wait(0.07)                                -- Server den Load registrieren lassen
   end
-  local fired = false
   if state.loadedSpell == spell then
     state.casts = 0
     pcall(fire, target)
-    fired = true
     g.SB_CASTS = (tonumber(g.SB_CASTS) or 0) + 1
     g.SB_LOADED = spell
   end
   g.SB_PRELOADED = nil
-  if g.SB_ULTRA and not fired then return end      -- Rad-Spell noch nicht geladen: nicht weiterruecken
   g.SB_LAST_CAST = os.clock()
   g.SB_ROT_IDX = (idx % #ROT) + 1                  -- IMMER weiterrotieren (kein Haengenbleiben)
 end
@@ -447,7 +274,6 @@ local function castCurrent()
     castApparToPos(realMouseHit())                 -- echte Maus, kein Silent-Aim
     g.SB_APPA_PENDING = false; g.SB_LAST_CAST = os.clock(); return
   end
-  if g.SB_ULTRA then return end                    -- Ultra Legit: nur der native Klick-Cast des Spiels
   if not g.SB_SAFE then return end
   fireSafeSlot(g.SB_PRELOADED ~= nil)
 end
@@ -470,7 +296,7 @@ local function startSelector()
   g.SB_CURSE_LOOP = true
   task.spawn(function()
     local nextAcquire = 0
-    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM or g.SB_ULTRA do
+    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM do
       pcall(function()
         if not g.SB_MOUSE then
           local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
@@ -494,7 +320,7 @@ local function startSelector()
         end
         g.SB_STATUS = nil
         -- Vor-Equip: nach 0.4s ohne Cast den aktuellen Slot schon laden (naechster Klick feuert sofort)
-        if g.SB_SAFE and not g.SB_ULTRA and not g.SB_FARM and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
+        if g.SB_SAFE and not g.SB_FARM and not g.SB_APPA_PENDING and not g.SB_CASTING and not g.SB_PRELOADED
            and os.clock() >= (g.SB_APPA_LOCK or 0)
            and refs and refs.set and refs.state and not isStunnedOrBound() then
           if (os.clock() - (g.SB_LAST_CAST or 0)) >= 0.4 then
@@ -743,13 +569,13 @@ local function startAim()
   if not (okM and pm) then g.SB_AIM_LOOP = false; return end
   local u13 = pm:GetMouse()
   local aimConn = RunService.RenderStepped:Connect(function()
-    if not g.SB_AIM then rawset(u13, "Hit", nil); g.SB_AIM_POINT = nil; return end
+    if not g.SB_AIM then rawset(u13, "Hit", nil); return end
     -- Legitness: fuer kurze Fenster (~0.2s) den Aim ganz aussetzen -> so viel % der Shots gehen daneben
     if os.clock() >= (g.SB_LEGIT_AIMNEXT or 0) then
       g.SB_LEGIT_AIMOFF = legitFail()
       g.SB_LEGIT_AIMNEXT = os.clock() + 0.2
     end
-    if g.SB_LEGIT_AIMOFF then rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; g.SB_AIM_POINT = nil; return end
+    if g.SB_LEGIT_AIMOFF then rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; return end
     local cam = workspace.CurrentCamera
     local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
     if not (cam and myHRP) then rawset(u13, "Hit", nil); return end
@@ -794,263 +620,10 @@ local function startAim()
     if bestH then
       local zonePart, zoneOff = aimZone(bestChar, bestH)     -- mal Kopf, mal Arm, mal Torso
       local aimPos = aimPointFor(origin, zonePart, bestHum, speed) + zoneOff
-      g.SB_AIM_TARGET = bestName
-      if g.SB_ULTRA then
-        -- Ultra Legit: kein harter Treffpunkt - der Fake-Zeiger gleitet zu diesem Punkt,
-        -- Hit folgt dem Zeiger (PlayerMouse berechnet Hit aus Position)
-        g.SB_AIM_POINT = aimPos; rawset(u13, "Hit", nil)
-      else
-        g.SB_AIM_POINT = nil; rawset(u13, "Hit", CFrame.new(aimPos))
-      end
-    else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil; g.SB_AIM_POINT = nil end
+      rawset(u13, "Hit", CFrame.new(aimPos)); g.SB_AIM_TARGET = bestName
+    else rawset(u13, "Hit", nil); g.SB_AIM_TARGET = nil end
   end)
   table.insert(g.SB_CONNS, aimConn)
-end
-
-
---========================= Ultra Legit =========================--
--- Sieht fuer Zuschauer und Aufnahmen (Medal) aus wie normales Spielen:
---   * Gecastet wird NUR nativ vom Spiel (dein Klick), ohne Cooldown-Trick. Das Script faehrt
---     nur Zeiger und Spell-Auswahl.
---   * Nachladen, sobald der geladene Spell verbraucht ist: WandClient.useSpell zaehlt casts
---     hoch und ruft bei maxCasts (x2/x3 je nach Stab) setLoadedSpell(nil) auf. Damit laedt
---     das Script bei einem 2-Cast-Stab automatisch nach jedem 2. Schuss nach.
---   * Rotation ueber alle Rad-Slots: ab dem aktuellen Slot der erste Spell, der NICHT auf
---     Lade-Abklingzeit ist. Die Abklingzeit rechnet das Rad beim Event
---     localSpellUsage "FIRE" aus (loadCooldown, sonst cooldownTime*6, +2 hostile, +5
---     unique+casting_storm) - hier mit derselben Formel mitgerechnet.
---   * Spell-Rad in ~50ms: R antippen (bzw. openWheel ueber das Modul des Spiels, wenn Roblox
---     nicht im Vordergrund ist), 1 Frame, Slot hovern, 1 Frame, Klick -> useBind -> LOAD_SPELL.
---   * Fake-Zeiger ohne Flackern: der Spiel-Cursor (PriorityUserInterface.Mouse) wird
---     ausgeblendet, eine 1:1-Kopie in einer eigenen GUI darueber uebernimmt jedes Frame Farbe,
---     Hitmarker und Sichtbarkeit vom Original und sitzt auf der geglaetteten Position. Ohne
---     Ziel folgt sie der echten Maus, mit Silent-Aim-Ziel gleitet sie dorthin. PlayerMouse
---     berechnet Hit aus Position -> der native Schuss geht dahin, wo der Zeiger steht.
-g.SB_ULTRA_SMOOTH = tonumber(g.SB_ULTRA_SMOOTH) or 10     -- Glaettung (hoeher = schneller am Ziel)
-g.SB_ULTRA_WHEEL  = tonumber(g.SB_ULTRA_WHEEL)  or 0.06   -- Pause nach dem Verbrauch bis zum Rad
-g.SB_ULTRA_SEL    = tonumber(g.SB_ULTRA_SEL)    or 0.2    -- Rad-Auswahl gesamt: R bis Klick (+-15% Streuung)
-g.SB_ULTRA_CD     = g.SB_ULTRA_CD or {}                    -- [spell] = os.clock()-Ende der Lade-Abklingzeit
-
-local function spellLoadCooldown(spell)
-  local d = okSp and spellsMod and spellsMod.list and spellsMod.list[spell]
-  if type(d) ~= "table" then return 0 end
-  local cd = d.loadCooldown
-  if not cd then
-    cd = (d.cooldownTime or 1) * 6
-    if d.hostile == true then cd = cd + 2 end
-    if d.unique == true and d.effects and d.effects.casting_storm == true then cd = cd + 5 end
-  end
-  return cd
-end
-
--- Native Casts mithoeren (Quelle der Rad-Abklingzeiten)
-if not g.SB_ULTRA_USAGE_HOOKED then
-  pcall(function()
-    local usage = require(RS.import)("bridges/localSpellUsage")
-    usage.Event:Connect(function(action, spell)
-      if action ~= "FIRE" or type(spell) ~= "string" then return end
-      g.SB_ULTRA_CD[spell] = os.clock() + spellLoadCooldown(spell)
-      g.SB_ULTRA_LASTFIRE = os.clock()
-    end)
-    g.SB_ULTRA_USAGE_HOOKED = true
-  end)
-end
-
-local function wheelBinds()
-  local pg = lp:FindFirstChild("PlayerGui")
-  local sw = pg and pg:FindFirstChild("SpellWheel")
-  local cont = sw and sw:FindFirstChild("Container")
-  return cont and cont:FindFirstChild("Binds"), cont
-end
-
-local function wheelSlotFor(spell)
-  local binds = wheelBinds()
-  if not binds then return nil end
-  for _, slot in ipairs(binds:GetChildren()) do
-    if slot:GetAttribute("incantation") == spell then return slot end
-  end
-  return nil
-end
-
--- Spell ueber das echte Rad auswaehlen, ~50ms. true, wenn der Klick abgesetzt wurde.
-local function wheelSelect(spell)
-  local slot = wheelSlotFor(spell)
-  local input = slot and slot:FindFirstChild("_Input")
-  if not input then return false, "nicht im Rad" end
-  if UIS:GetFocusedTextBox() then return false, "Textfeld aktiv" end
-  if lp:GetAttribute("Client_IsClashing") == true then return false, "im Clash" end
-  local _, cont = wheelBinds()
-  local tOpen = os.clock()
-  local active = true
-  pcall(function() if isrbxactive then active = isrbxactive() end end)
-  if active then
-    pcall(function() keypress(0x52); keyrelease(0x52) end)   -- R antippen: Rad ueber den Spiel-Handler
-    RunService.Heartbeat:Wait()
-  end
-  if not (cont and cont.Visible) then
-    -- keypress geht ans aktive Fenster; ohne Fokus das Rad ueber das Modul des Spiels oeffnen
-    pcall(function()
-      local sw = lp.PlayerScripts:FindFirstChild("spellWheel", true)
-      local wr = sw and require(sw:FindFirstChild("wheelRenderer"))
-      if wr and wr.openWheel then
-        if wr.refitGui then wr.refitGui() end
-        wr.openWheel(0, Enum.KeyCode.R)
-      end
-    end)
-  end
-  local okE, enters = pcall(getconnections, input.MouseEnter)
-  for _, c in ipairs(okE and enters or {}) do pcall(function() c:Fire() end) end
-  -- menschliche Auswahlzeit: vom Oeffnen bis zum Klick insgesamt ~SB_ULTRA_SEL, leicht gestreut
-  local sel = math.clamp(tonumber(g.SB_ULTRA_SEL) or 0.2, 0, 0.6)
-  local rest = sel * (0.85 + math.random() * 0.3) - (os.clock() - tOpen)
-  if rest > 0.02 then task.wait(rest) else RunService.Heartbeat:Wait() end
-  local okC, clicks = pcall(getconnections, input.MouseButton1Click)
-  for _, c in ipairs(okC and clicks or {}) do pcall(function() c:Fire() end) end
-  -- blieb das Rad offen (Abklingzeit/Mana), wieder schliessen
-  task.delay(0.3, function()
-    if cont and cont.Visible then
-      pcall(function() require(RS.import)("bridges/localSpellWheel"):Fire("CLOSE_WHEEL") end)
-    end
-  end)
-  return true
-end
-
--- naechster Rotations-Spell, der im Rad liegt und nicht auf Abklingzeit ist
-local function ultraPickSpell()
-  local ROT = g.SB_SAFE_ROT or {}
-  local n = #ROT
-  if n == 0 then return nil end
-  local start = tonumber(g.SB_ROT_IDX) or 1
-  local now = os.clock()
-  for k = 0, n - 1 do
-    local i = ((start - 1 + k) % n) + 1
-    local sp = ROT[i]
-    if sp and (g.SB_ULTRA_CD[sp] or 0) <= now and wheelSlotFor(sp) then
-      return sp, i
-    end
-  end
-  return nil
-end
-
-local fakeGui, fakeCur, fakePairs
-local function destroyFakeCursor()
-  if fakeGui then pcall(function() fakeGui:Destroy() end) end
-  fakeGui, fakeCur, fakePairs = nil, nil, nil
-end
-
--- 1:1-Kopie des Spiel-Cursors in eigener GUI ueber dem Original
-local function ensureFakeCursor()
-  local pg = lp:FindFirstChild("PlayerGui")
-  local pui = pg and pg:FindFirstChild("PriorityUserInterface")
-  local orig = pui and pui:FindFirstChild("Mouse")
-  if not orig then return nil end
-  if fakeGui and fakeGui.Parent and fakeCur and fakeCur.Parent then return orig end
-  destroyFakeCursor()
-  fakeGui = Instance.new("ScreenGui")
-  fakeGui.Name = "SB_FakeCursor"; fakeGui.ResetOnSpawn = false; fakeGui.IgnoreGuiInset = true
-  fakeGui.DisplayOrder = 999999999; fakeGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-  fakeGui.Parent = pg
-  fakeCur = orig:Clone()
-  fakeCur.Visible = true
-  fakeCur.Parent = fakeGui
-  -- Original und Kopie paarweise (Clone behaelt die Descendant-Reihenfolge)
-  local od, cd = orig:GetDescendants(), fakeCur:GetDescendants()
-  fakePairs = {}
-  for i = 1, math.min(#od, #cd) do fakePairs[#fakePairs + 1] = { od[i], cd[i] } end
-  return orig
-end
-
-local function mirrorCursor(orig)
-  for _, pr in ipairs(fakePairs or {}) do
-    local o, c = pr[1], pr[2]
-    pcall(function()
-      if o:IsA("GuiObject") then
-        c.Visible = o.Visible; c.Size = o.Size; c.Rotation = o.Rotation
-        c.BackgroundTransparency = o.BackgroundTransparency
-        if o:IsA("ImageLabel") then c.ImageColor3 = o.ImageColor3; c.ImageTransparency = o.ImageTransparency end
-      elseif o:IsA("UIStroke") then
-        c.Transparency = o.Transparency; c.Color = o.Color; c.Thickness = o.Thickness
-      end
-    end)
-  end
-end
-
-local function stopUltraCursor()
-  pcall(function()
-    local pmS = require(RS.shared.modules.PlayerMouse):GetMouse()
-    rawset(pmS, "Position", nil)
-  end)
-  pcall(function()
-    local orig = lp.PlayerGui.PriorityUserInterface:FindFirstChild("Mouse")
-    if orig then orig.Visible = not UIS.MouseIconEnabled end  -- Spiel-Cursor wie vom Spiel gewollt zurueck
-  end)
-  destroyFakeCursor()
-end
-
-local function startUltra()
-  if g.SB_ULTRA_LOOP then return end
-  g.SB_ULTRA_LOOP = true
-  startSelector()                                  -- haelt g.SB_REFS (loadedSpell) aktuell
-  local okM, pmMod = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
-  local mouseObj = okM and pmMod and pmMod:GetMouse() or nil
-  local fake = UIS:GetMouseLocation()
-  local cursorConn = RunService.RenderStepped:Connect(function(dt)
-    if not g.SB_ULTRA then return end
-    if not g.SB_AIM then
-      -- Silent-Aim aus: Ultra fasst Maus und Cursor ueberhaupt nicht an (nur die Rad-Rotation laeuft)
-      if fakeGui then stopUltraCursor() end
-      fake = UIS:GetMouseLocation()
-      return
-    end
-    pcall(function()
-      local real = UIS:GetMouseLocation()
-      local desired = real
-      local point = g.SB_AIM and g.SB_AIM_POINT
-      local cam = workspace.CurrentCamera
-      if point and cam then
-        local sp, on = cam:WorldToViewportPoint(point)
-        if on and sp.Z > 0 then desired = Vector2.new(sp.X, sp.Y) end
-      end
-      local k = 1 - math.exp(-(tonumber(g.SB_ULTRA_SMOOTH) or 10) * math.min(dt, 0.1))
-      fake = fake + (desired - fake) * k
-      if mouseObj then rawset(mouseObj, "Position", fake); rawset(mouseObj, "Hit", nil) end
-      local orig = ensureFakeCursor()
-      if orig and fakeCur then
-        local want = not UIS.MouseIconEnabled      -- das Spiel zeigt seinen Cursor genau dann
-        mirrorCursor(orig)
-        orig.Visible = false
-        fakeCur.Visible = want
-        fakeCur.Position = UDim2.fromOffset(fake.X - 11, fake.Y - 8)
-      end
-    end)
-  end)
-  table.insert(g.SB_CONNS, cursorConn)
-  task.spawn(function()
-    local busyUntil = 0
-    while g.SB_ULTRA do
-      pcall(function()
-        local refs = g.SB_REFS
-        if not (refs and refs.state and refs.state.equipped) then return end
-        if refs.state.loadedSpell ~= nil then busyUntil = 0; return end  -- geladen: Sperre frei, Spell noch nicht verbraucht
-        if g.SB_APPA_PENDING or isStunnedOrBound() then return end
-        if os.clock() < busyUntil then return end
-        if os.clock() - (g.SB_ULTRA_LASTFIRE or 0) < (tonumber(g.SB_ULTRA_WHEEL) or 0.06) then return end
-        local spell, i = ultraPickSpell()
-        if not spell then g.SB_ULTRA_STATUS = "alle Spells auf Abklingzeit"; return end
-        busyUntil = os.clock() + 0.35 + (tonumber(g.SB_ULTRA_SEL) or 0.2)  -- nicht doppelt ins Rad klicken
-        local ok, why = wheelSelect(spell)
-        if ok then
-          g.SB_ROT_IDX = (i % #g.SB_SAFE_ROT) + 1    -- naechstes Mal ab dem folgenden Slot
-          g.SB_ULTRA_STATUS = "Rad: " .. spell
-        else
-          g.SB_ULTRA_STATUS = "Rad: " .. tostring(why)
-        end
-      end)
-      RunService.Heartbeat:Wait()
-    end
-    stopUltraCursor()
-    g.SB_ULTRA_LOOP = false
-  end)
 end
 
 --========================= Visuals: Box-ESP / Namen / Chams =========================--
@@ -1178,7 +751,7 @@ local function startVisuals()
             o.stroke.Color = col; o.box.Visible = true
           else o.box.Visible = false end
           if g.SB_ESP_NAMES then
-            o.nm.Text = (pl.DisplayName ~= "" and pl.DisplayName) or pl.Name; o.nm.TextColor3 = col  -- Anzeigename wie im Spiel
+            o.nm.Text = pl.Name; o.nm.TextColor3 = col
             o.nm.Position = UDim2.fromOffset(minX + w * 0.5 - 110, minY - 16)
             o.nm.Visible = true
             -- "Moderator" direkt unter dem Namen, hellblau (nur bei Staff)
@@ -1346,44 +919,7 @@ end
 -- ob der Pointer im Arc ist, und druecken exakt beim Eintritt Space (VirtualInputManager
 -- = legitimer Input-Pfad: spielt Success, sendet echtes moveClash-Packet, rueckt vor).
 -- armed-Guard = genau ein Fire pro Arc-Eintritt -> nie der 1s-Miss-Stun.
-if g.SB_CLASH_INSTANT == nil then g.SB_CLASH_INSTANT = false end   -- Sofort-Sieg: standardmaessig aus
-
--- Sofort-Sieg: der Server schickt beim Clash-Start den Seed (toggleSpellsClashing.seed). Die Boegen
--- entstehen daraus exakt wie in ArcScribe.next (Random.new(seed): Groesse, Start, Bonus-Start,
--- Bonus-Groesse). Wir senden direkt fuer jeden Bogen ein moveClash mit einem Winkel in der Bogenmitte,
--- statt auf den Zeiger zu warten -> Clash in ~1s gewonnen (live gemessen 0.87s).
--- Listener nur einmal pro Session (packets.listen laesst sich nicht trennen), liest die Flags live.
-local function hookClashInstant()
-  if g.SB_CLASH_INSTANT_HOOKED or not (okPk and packets and packets.toggleSpellsClashing) then return end
-  g.SB_CLASH_INSTANT_HOOKED = true
-  packets.toggleSpellsClashing.listen(function(p)
-    if type(p) ~= "table" then return end
-    if p.shouldClash ~= true then g.SB_CLASH_BURST_UNTIL = 0; return end
-    if not (g.SB_CLASH and g.SB_CLASH_INSTANT and p.seed) then return end
-    g.SB_CLASH_RUN = (tonumber(g.SB_CLASH_RUN) or 0) + 1
-    local run = g.SB_CLASH_RUN
-    local gap = 0.05
-    g.SB_CLASH_BURST_UNTIL = os.clock() + 41 * gap + 0.5   -- solange keine Space-Druecke vom Arc-Loop
-    task.spawn(function()
-      pcall(function()
-        local rng = Random.new(p.seed)
-        for i = 0, 40 do
-          if g.SB_CLASH_RUN ~= run or not g.SB_CLASH or lp:GetAttribute("Client_IsClashing") == false then break end
-          local size  = rng:NextInteger(30, 60)
-          local start = rng:NextInteger(-180, 180)
-          rng:NextInteger(-180, 180); rng:NextInteger(15, 30)          -- Bonusbogen (Reihenfolge wie ArcScribe)
-          packets.moveClash.send({ arcIndex = i, clientAngle = ((start + size / 2) % 360 + 360) % 360 })
-          g.SB_CLASH_HITS = (tonumber(g.SB_CLASH_HITS) or 0) + 1
-          task.wait(gap)
-        end
-      end)
-      if g.SB_CLASH_RUN == run then g.SB_CLASH_BURST_UNTIL = 0 end   -- Clash noch offen? normaler Loop uebernimmt
-    end)
-  end)
-end
-
 local function startClashAuto()
-  hookClashInstant()
   if g.SB_CLASH_LOOP then return end
   g.SB_CLASH_LOOP = true
   local VIM = game:GetService("VirtualInputManager")
@@ -1395,7 +931,6 @@ local function startClashAuto()
   end
   local clashConn = RunService.Heartbeat:Connect(function()
     if not g.SB_CLASH then armed = true; return end
-    if g.SB_CLASH_INSTANT and os.clock() < (tonumber(g.SB_CLASH_BURST_UNTIL) or 0) then return end  -- Sofort-Sieg sendet gerade
     local Clashing = pg:FindFirstChild("Clashing")
     if not Clashing or not Clashing.Enabled or lp:GetAttribute("Client_IsClashing") ~= true then
       armed = true; return
@@ -1635,16 +1170,6 @@ local function isAirborne(pl)
   local t = tonumber(ch:GetAttribute("TIMING_TAG_PLAYER_APPARATING"))
   return t ~= nil and (workspace:GetServerTimeNow() - t) < 2.5
 end
-
-if g.SB_FARM_SKIP_CLASH == nil then g.SB_FARM_SKIP_CLASH = true end   -- Spieler im Clash-Duell auslassen
-
--- Im Clash-Duell: der Server setzt am Charakter BEIDER Teilnehmer IsClashing=true und
--- ClashingWith="player:<UserId>"; beim Ende ClashingWith=nil und IsClashing=false.
--- In-game mitgeschnitten (Duell lief 42s, Reset kam zeitgleich mit dem "end"-Paket).
-local function isInClash(pl)
-  local ch = pl and pl.Character
-  return ch ~= nil and (ch:GetAttribute("IsClashing") == true or ch:GetAttribute("ClashingWith") ~= nil)
-end
 if g.SB_FARM_SKIP_STAFF   == nil then g.SB_FARM_SKIP_STAFF = true end    -- Moderatoren auslassen
 if g.SB_FARM_RETURN       == nil then g.SB_FARM_RETURN = true end        -- am Ende zurueck
 if g.SB_FARM_REPEAT       == nil then g.SB_FARM_REPEAT = true end        -- endlos rotieren
@@ -1815,32 +1340,23 @@ local function farmTargets()
   local myHRP = lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")
   local me    = myHRP and myHRP.Position or Vector3.zero
   local list  = {}
-  -- Nur-Ziel (z.B. eigener Zweit-Account): dann ausschliesslich diesen Spieler farmen,
-  -- Freunde-/Ausnahme-Listen gelten fuer ihn nicht
-  local only = type(g.SB_FARM_ONLY) == "string" and g.SB_FARM_ONLY ~= "" and g.SB_FARM_ONLY:lower() or nil
   for _, pl in ipairs(Players:GetPlayers()) do
-    if pl ~= lp and (not only or pl.Name:lower() == only) then
+    if pl ~= lp then
       local ch   = pl.Character
       local root = ch and (ch:FindFirstChild("HumanoidRootPart") or ch.PrimaryPart)
       local hum  = ch and ch:FindFirstChildOfClass("Humanoid")
       if root and hum and hum.Health > 0 then
         local skip = false
-        if only then
-          if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
-          if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
-        elseif g.SB_FARM_EXEMPT_OK then
+        if g.SB_FARM_EXEMPT_OK then
           local fid = playerFactionId(pl)
           if g.SB_AIM_EXEMPT[pl.Name] then skip = true end
           if fid and g.SB_AIM_EXEMPT_FACTION[fid] and not g.SB_AIM_KEEP[pl.Name] then skip = true end
         end
-        if not only then
-          if isFriend(pl) then skip = true end
-          if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
-          if g.SB_FARM_SKIP_AIR and isAirborne(pl) then skip = true end
-          if g.SB_FARM_SKIP_CLASH and isInClash(pl) then skip = true end
-          if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
-          if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
-        end
+        if isFriend(pl) then skip = true end
+        if g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true then skip = true end
+        if g.SB_FARM_SKIP_AIR and isAirborne(pl) then skip = true end
+        if g.SB_FARM_SKIP_STAFF and isStaff(pl) then skip = true end
+        if not skip then list[#list + 1] = { pl = pl, d = (root.Position - me).Magnitude } end
       end
     end
   end
@@ -1882,7 +1398,6 @@ local function startFarm()
           -- Safe-Zone kann sich waehrend der Runde aendern -> direkt vor dem Hop nochmal pruefen
           local safe = (g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true)
                     or (g.SB_FARM_SKIP_AIR and isAirborne(pl))
-                    or (g.SB_FARM_SKIP_CLASH and isInClash(pl))
           if root and hum and hum.Health > 0 and not safe then
             g.SB_FARM_TARGET = pl.Name
             local depth = tonumber(g.SB_FARM_DEPTH) or 15
@@ -1895,7 +1410,6 @@ local function startFarm()
               -- Ziel koennte inzwischen weg/tot/in einer Safe Zone sein -> frisch pruefen
               local stillSafe = (g.SB_FARM_SKIP_SAFE and pl:GetAttribute("InSafeZone") == true)
                              or (g.SB_FARM_SKIP_AIR and isAirborne(pl))
-                             or (g.SB_FARM_SKIP_CLASH and isInClash(pl))
               if g.SB_FARM and root.Parent and hum.Health > 0 and not stillSafe and not isStunnedOrBound() then
                 farmCast(root, hum)
               end
@@ -2209,6 +1723,11 @@ end
 g.SB_SNIPE_DEPTH = tonumber(g.SB_SNIPE_DEPTH) or 15    -- Studs unter dem Ziel
 g.SB_SNIPE_DELAY = tonumber(g.SB_SNIPE_DELAY) or 0.05  -- Wartezeit nach dem TP vor dem Cast
 if g.SB_SNIPE_CARVE == nil then g.SB_SNIPE_CARVE = true end  -- Terrain-Blase (sonst blockt der Boden)
+-- LOBOTOMY-MODE: statt unter die Map seitlich NEBEN das Ziel, und alles deutlich langsamer
+-- (vor dem Cast + nach dem Cast je LOBO_T stehen bleiben, Blick aufs Ziel).
+if g.SB_SNIPE_LOBO == nil then g.SB_SNIPE_LOBO = false end
+g.SB_SNIPE_LOBO_T    = tonumber(g.SB_SNIPE_LOBO_T) or 0.6     -- Verweilzeit vor/nach dem Cast
+g.SB_SNIPE_LOBO_DIST = tonumber(g.SB_SNIPE_LOBO_DIST) or 6    -- Seitenabstand zum Ziel
 
 -- Ziel: erst das Silent-Aim-Ziel, sonst der Spieler am naechsten zum Cursor.
 local function snipePickTarget()
@@ -2285,9 +1804,12 @@ local function doSnipe()
     -- 2) So lange warten, dass der Schuss von unten GENAU mit dem Einschlag des Tarnschusses
     --    zusammenfaellt: Flugzeit minus dem, was die Sequenz selbst braucht
     --    (Spell-Load + TP-Delay + Flugzeit der Tiefe).
-    local depth     = tonumber(g.SB_SNIPE_DEPTH) or 15
+    local lobo      = g.SB_SNIPE_LOBO == true
+    local loboT     = tonumber(g.SB_SNIPE_LOBO_T) or 0.6
+    local castDelay = lobo and loboT or (tonumber(g.SB_SNIPE_DELAY) or 0.05)
+    local depth     = lobo and (tonumber(g.SB_SNIPE_LOBO_DIST) or 6) or (tonumber(g.SB_SNIPE_DEPTH) or 15)
     local killSpell = nextSpell()
-    local prep      = 0.07 + (tonumber(g.SB_SNIPE_DELAY) or 0.05) + depth / speedOf(killSpell)
+    local prep      = 0.07 + castDelay + depth / speedOf(killSpell)
     local waitT     = flight - prep
     if waitT > 0 then task.wait(waitT) end
 
@@ -2297,12 +1819,27 @@ local function doSnipe()
         g.SB_SNIPE_STATUS = pl.Name .. ": Tarnschuss hat gereicht"
         return
       end
-      local spot = root.Position - Vector3.new(0, depth, 0)
+      local spot
+      if lobo then
+        -- seitlich neben das Ziel: senkrecht zur Linie home->Ziel, freie Seite per Raycast
+        local flat = Vector3.new(root.Position.X - home.Position.X, 0, root.Position.Z - home.Position.Z)
+        if flat.Magnitude < 0.1 then flat = Vector3.new(0, 0, 1) end
+        local side = Vector3.new(-flat.Unit.Z, 0, flat.Unit.X)
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        rp.FilterDescendantsInstances = { lp.Character, ch }
+        if workspace:Raycast(root.Position, side * depth, rp) then side = -side end
+        spot = root.Position + side * depth
+      else
+        spot = root.Position - Vector3.new(0, depth, 0)
+      end
       if not farmTeleport(spot) then return end     -- verankert das HRP (sonst faellt man)
-      if g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
+      if lobo then
+        pcall(function() hrp.CFrame = CFrame.lookAt(spot, Vector3.new(root.Position.X, spot.Y, root.Position.Z)) end)
+      elseif g.SB_SNIPE_CARVE and not g.SB_TERR_WIPED and not g.SB_MAP_NUKED then
         carveKey = carveShaft(spot, root.Position)   -- schmale Saeule, 12 Studs breit
       end
-      task.wait(tonumber(g.SB_SNIPE_DELAY) or 0.05)
+      task.wait(castDelay)
       if killSpell and root.Parent and hum.Health > 0 then
         if farmCast(root, hum, killSpell) then
           g.SB_SNIPE_COUNT  = (tonumber(g.SB_SNIPE_COUNT) or 0) + 1
@@ -2311,6 +1848,7 @@ local function doSnipe()
           g.SB_SNIPE_STATUS = "Cast fehlgeschlagen"
         end
       end
+      if lobo then task.wait(loboT) end              -- Lobotomy: neben dem Ziel stehen bleiben
     end)
     -- IMMER zurueck nach Hause: das GANZE Modell bewegen (PivotTo), nicht nur das HRP - sonst
     -- steht man fuer die anderen wieder daheim, auf dem eigenen Schirm aber noch unter der Map.
@@ -2373,7 +1911,6 @@ g.SB_LOCK_DEPTH = tonumber(g.SB_LOCK_DEPTH) or 15      -- Studs unter dem Ziel
 g.SB_LOCK_DELAY = tonumber(g.SB_LOCK_DELAY) or 0.05    -- Wartezeit nach dem TP vor dem Cast
 g.SB_LOCK_GAP   = tonumber(g.SB_LOCK_GAP)   or 0.05    -- Pause daheim vor dem normalen Schuss
 if g.SB_LOCK_CARVE == nil then g.SB_LOCK_CARVE = true end
-if g.SB_LOCK_FOLLOW == nil then g.SB_LOCK_FOLLOW = true end  -- aus: kein zusaetzlicher "normaler" Tarn-Schuss von daheim
 
 local function doLockCombo()
   if g.SB_LOCK_BUSY or g.SB_SNIPE_BUSY then return end
@@ -2450,12 +1987,6 @@ local function doLockCombo()
     end
 
     -- 3) NORMALER Schuss von daheim: naechster Slot der Safe-Combat-Rotation
-    --    (abschaltbar: dann bleibt es beim Halte-Spell, kein zusaetzlicher Tarn-Schuss)
-    if g.SB_LOCK_FOLLOW == false then
-      g.SB_LOCK_COUNT = (tonumber(g.SB_LOCK_COUNT) or 0) + 1
-      g.SB_LOCK_BUSY = false
-      return
-    end
     task.wait(tonumber(g.SB_LOCK_GAP) or 0.05)
     pcall(function()
       if not (root.Parent and hum.Health > 0) then
@@ -3021,15 +2552,14 @@ local CFG_KEYS = {
   "SB_AIM_FOV", "SB_AIM_RANGE", "SB_AIM_PRED", "SB_AIM_NPC", "SB_AIM_PROJSPEED",
   "SB_AIM_SKIP_STAFF", "SB_AIM_ZONES", "SB_AIM_ZONEROLL",
   "SB_DODGE_PCT", "SB_LEGIT", "SB_APPA_TARGET",
-  "SB_ULTRA_SMOOTH", "SB_ULTRA_WHEEL", "SB_ULTRA_SEL",
   "SB_FARM_SPELL", "SB_FARM_DEPTH", "SB_FARM_DELAY", "SB_FARM_ROUND", "SB_FARM_NUKE",
   "SB_FARM_UNNUKE", "SB_FARM_CARVE", "SB_FARM_WIPE_TERRAIN", "SB_FARM_EXEMPT_OK",
-  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_CLASH", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
+  "SB_FARM_SKIP_SAFE", "SB_FARM_SKIP_AIR", "SB_FARM_SKIP_STAFF", "SB_FARM_RETURN", "SB_FARM_REPEAT", "SB_FARM_FIXWAND",
   "SB_KD_PAUSE", "SB_KD_LIMIT", "SB_SEAL_DELAY",
   "SB_SEALFARM_DELAY", "SB_SEALFARM_MAXCASTS", "SB_SEALFARM_RETURN", "SB_SEALFARM_UNDER",
   "SB_SHOT_IV", "SB_SHOT_BURST", "SB_SHOT_REEQUIP", "SB_SHOT_UNIQUE", "SB_SHOT_SPELL",
-  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE",
-  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE", "SB_LOCK_FOLLOW", "SB_CLASH_INSTANT",
+  "SB_SNIPE_DEPTH", "SB_SNIPE_DELAY", "SB_SNIPE_CARVE", "SB_SNIPE_LOBO", "SB_SNIPE_LOBO_T", "SB_SNIPE_LOBO_DIST",
+  "SB_LOCK_SPELL", "SB_LOCK_DEPTH", "SB_LOCK_DELAY", "SB_LOCK_GAP", "SB_LOCK_CARVE",
   "SB_DEWAND_SPELL", "SB_DEWAND_CD", "SB_DEWAND_SAFE",
   "SB_OBSC_TIME", "SB_OBSC_CONJ",
   "SB_STAFF_LEAVE", "SB_STAFF_HOP", "SB_STAFF_ESP", "SB_FRIEND_AUTO",
@@ -3037,7 +2567,7 @@ local CFG_KEYS = {
 }
 local CFG_TABLES  = { "SB_SAFE_ROT", "SB_AIM_EXEMPT", "SB_AIM_KEEP", "SB_KEYS", "SB_DEWAND_LIST" }
 local CFG_NUMKEY  = { "SB_AIM_EXEMPT_FACTION" }   -- Zahl-Keys: JSON macht Strings daraus
-local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE", "SB_ULTRA", "SB_OBSC",
+local CFG_MODULES = { "SB_AIM", "SB_SHIELD", "SB_CLASH", "SB_SEAL", "SB_DODGE", "SB_SAFE", "SB_OBSC",
                       "SB_TEAM_ESP", "SB_ESP_NAMES", "SB_CHAMS" }
 local CFG_HOTMODS = { "SB_FARM", "SB_KD", "SB_SHOT" }   -- greifen von selbst ins Spiel ein
 -- Streamproof bleibt bewusst draussen: gespeichert "an" waere die GUI nach dem Laden
@@ -3108,7 +2638,6 @@ local function cfgApplyModules(mods)
     g.SB_SEAL = on("SB_SEAL");     if g.SB_SEAL then startSealAuto(); startSealAttune() end
     g.SB_DODGE = on("SB_DODGE");   if g.SB_DODGE then g.SB_DODGE_SKIPACC = 0; hookDodge() end
     g.SB_SAFE = on("SB_SAFE");     if g.SB_SAFE then startSelector() end
-    g.SB_ULTRA = on("SB_ULTRA");   if g.SB_ULTRA then startSelector(); startUltra() end
     g.SB_TEAM_ESP, g.SB_ESP_NAMES, g.SB_CHAMS = on("SB_TEAM_ESP"), on("SB_ESP_NAMES"), on("SB_CHAMS")
     if g.SB_TEAM_ESP or g.SB_ESP_NAMES or g.SB_CHAMS or g.SB_STAFF_ESP then startVisuals() end
   end
@@ -3523,7 +3052,6 @@ local function mountGui()
 
   -- === Panel (Kategorie) ===
   local PANEL_W = 132
-  local SET_MAX = 230                   -- max. Hoehe eines Einstellungs-Blocks (unskaliert), darueber scrollt er
   local function makePanel(title, px, py)
     local panel = Instance.new("Frame")
     panel.Size = UDim2.fromOffset(PANEL_W, 0); panel.AutomaticSize = Enum.AutomaticSize.Y
@@ -3546,37 +3074,14 @@ local function mountGui()
     hmark.Position = UDim2.new(1, -18, 0, 0); hmark.BackgroundTransparency = 1
     hmark.Font = Enum.Font.GothamBold; hmark.TextSize = 13; hmark.TextColor3 = DARKTXT
     hmark.AutoButtonColor = false; hmark.Text = "\xe2\x80\x93"; hmark.Parent = head
-    -- Inhalt scrollt, sobald das Panel sonst ueber den unteren Bildschirmrand ragen wuerde.
-    -- Hoehe = Inhalt, gedeckelt auf den Platz bis zum Rand; nachgerechnet bei neuem Inhalt,
-    -- beim Verschieben des Panels und bei geaenderter Fenstergroesse. AbsoluteContentSize ist
-    -- in Bildschirm-Pixeln, der Host ist um UI_SCALE skaliert -> zurueckrechnen.
-    local body = Instance.new("ScrollingFrame"); body.BackgroundTransparency = 1
-    body.Size = UDim2.new(1, 0, 0, 0); body.BorderSizePixel = 0
-    body.ScrollBarThickness = 3; body.ScrollBarImageColor3 = ACCENT
-    body.ScrollingDirection = Enum.ScrollingDirection.Y
-    body.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
-    body.CanvasSize = UDim2.new(0, 0, 0, 0)
+    local body = Instance.new("Frame"); body.BackgroundTransparency = 1
+    body.Size = UDim2.new(1, 0, 0, 0); body.AutomaticSize = Enum.AutomaticSize.Y
     body.LayoutOrder = 1; body.Parent = panel
     local bl = Instance.new("UIListLayout", body); bl.SortOrder = Enum.SortOrder.LayoutOrder
     bl.Padding = UDim.new(0, 1)
     local bp = Instance.new("UIPadding", body)
     bp.PaddingTop = UDim.new(0, 2); bp.PaddingBottom = UDim.new(0, 3)
     bp.PaddingLeft = UDim.new(0, 2); bp.PaddingRight = UDim.new(0, 2)
-    local function fitBody()
-      if not body.Parent then return end
-      local content = bl.AbsoluteContentSize.Y / UI_SCALE + 5
-      local cam = workspace.CurrentCamera
-      local screenH = (cam and cam.ViewportSize.Y or 1080) / UI_SCALE
-      local avail = screenH - panel.Position.Y.Offset - 21 - 12
-      body.CanvasSize = UDim2.fromOffset(0, content)
-      body.Size = UDim2.new(1, 0, 0, math.max(60, math.min(content, avail)))
-    end
-    bl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitBody)
-    panel:GetPropertyChangedSignal("Position"):Connect(fitBody)
-    if workspace.CurrentCamera then
-      table.insert(g.SB_CONNS, workspace.CurrentCamera:GetPropertyChangedSignal("ViewportSize"):Connect(fitBody))
-    end
-    task.defer(fitBody)
     -- Einklappen (Klick auf das Zeichen rechts im Header)
     hmark.MouseButton1Click:Connect(function()
       body.Visible = not body.Visible
@@ -3607,28 +3112,14 @@ local function mountGui()
     local function toggle()
       expanded = not expanded
       if expanded then
-        -- Scrollbar statt endlos lang (z.B. Silent-Aim): der Block wird hoechstens SET_MAX hoch
-        -- und scrollt darueber hinaus; die Hoehe folgt dem Inhalt.
-        sf = Instance.new("ScrollingFrame"); sf.LayoutOrder = ord * 10 + 1
-        sf.Size = UDim2.new(1, 0, 0, 0)
+        sf = Instance.new("Frame"); sf.LayoutOrder = ord * 10 + 1
+        sf.Size = UDim2.new(1, 0, 0, 0); sf.AutomaticSize = Enum.AutomaticSize.Y
         sf.BackgroundColor3 = SET_BG; sf.BorderSizePixel = 0; sf.Parent = panel.body
-        sf.ScrollBarThickness = 3; sf.ScrollBarImageColor3 = ACCENT
-        sf.ScrollingDirection = Enum.ScrollingDirection.Y
-        sf.VerticalScrollBarInset = Enum.ScrollBarInset.ScrollBar
-        sf.CanvasSize = UDim2.new(0, 0, 0, 0)
         corner(sf, 2)
         local sl = Instance.new("UIListLayout", sf); sl.SortOrder = Enum.SortOrder.LayoutOrder
         sl.Padding = UDim.new(0, 3); sl.HorizontalAlignment = Enum.HorizontalAlignment.Center
         local spad = Instance.new("UIPadding", sf)
         spad.PaddingTop = UDim.new(0, 5); spad.PaddingBottom = UDim.new(0, 6)
-        local thisSf = sf
-        local function fitSettings()
-          if not thisSf.Parent then return end
-          local content = sl.AbsoluteContentSize.Y / UI_SCALE + 11
-          thisSf.CanvasSize = UDim2.fromOffset(0, content)
-          thisSf.Size = UDim2.new(1, 0, 0, math.min(content, SET_MAX))
-        end
-        sl:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(fitSettings)
         -- gruene Kante links als Verlauf auf dem Hintergrund (ein echtes Frame mit
         -- Size.Y.Scale=1 wuerde unter dem UIListLayout mit AutomaticSize zurueckkoppeln)
         local eg = Instance.new("UIGradient", sf)
@@ -3636,8 +3127,6 @@ local function mountGui()
           ColorSequenceKeypoint.new(0, ACCENT), ColorSequenceKeypoint.new(0.016, ACCENT),
           ColorSequenceKeypoint.new(0.017, SET_BG), ColorSequenceKeypoint.new(1, SET_BG) })
         buildSettings(sf)
-        fitSettings()
-        task.defer(fitSettings)
         if arrow then arrow.Text = "\xe2\x80\x93" end
       else
         if sf then sf:Destroy(); sf = nil end
@@ -3839,11 +3328,15 @@ local function mountGui()
     end)
   addModule(combat, "Auto-Clash",
     function() return g.SB_CLASH end,
-    function(v) g.SB_CLASH = v; if v then startClashAuto() end end,
+    function(v) g.SB_CLASH = v; if v then startClashAuto() end end)
+  addModule(combat, "Auto-Seal",
+    function() return g.SB_SEAL end,
+    function(v) g.SB_SEAL = v; if v then startSealAuto(); startSealAttune() end end,
     function(sf)
-      makeToggleW(sf, 1, "Sofort-Sieg", function() return g.SB_CLASH_INSTANT == true end,
-        function() g.SB_CLASH_INSTANT = not (g.SB_CLASH_INSTANT == true); if g.SB_CLASH then hookClashInstant() end end)
-      addInfo(sf, 2, "Sofort-Sieg: rechnet alle Boegen aus dem Clash-Seed vor und sendet die Treffer direkt (~1s pro Clash) statt auf den Zeiger zu warten. Faellt ins normale Auto-Clash zurueck, falls der Clash danach noch laeuft. Sehr auffaellig - standardmaessig aus.", 64)
+      makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
+        function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
+        function(v) return string.format("%.2fs", v) end)
+      addInfo(sf, 2, "Clash Seal: castet in Reichweite automatisch auf den Orb (attunen), danach wird jeder Bogen aus dem Seed des Servers nachgerechnet und mittig getroffen (bei Ueberlappung der Bonus). Der normale Auto-Clash greift hier nicht - eigenes Paket, eigene GUI.", 76)
     end)
   addModule(combat, "Auto-Dodge",
     function() return g.SB_DODGE end,
@@ -3860,25 +3353,6 @@ local function mountGui()
         makeDropdownW(sf, i, function() return "Slot " .. i .. ": " .. tostring(g.SB_SAFE_ROT[i]) end,
           getSpellList, function(n) g.SB_SAFE_ROT[i] = n end)
       end
-    end)
-
-  addModule(combat, "Ultra Legit",
-    function() return g.SB_ULTRA end,
-    function(v)
-      g.SB_ULTRA = v
-      if v then startSelector(); startUltra() else stopUltraCursor() end
-    end,
-    function(sf)
-      makeSliderW(sf, 1, "Aim-Glaettung", 2, 30, function() return tonumber(g.SB_ULTRA_SMOOTH) or 10 end,
-        function(v) g.SB_ULTRA_SMOOTH = math.floor(v * 10 + 0.5) / 10 end,
-        function(v) return string.format("%.1f", v) end)
-      makeSliderW(sf, 2, "Reaktion bis Rad", 0, 0.5, function() return tonumber(g.SB_ULTRA_WHEEL) or 0.06 end,
-        function(v) g.SB_ULTRA_WHEEL = math.floor(v * 100 + 0.5) / 100 end,
-        function(v) return string.format("%.2fs", v) end)
-      makeSliderW(sf, 3, "Auswahl-Dauer", 0.05, 0.5, function() return tonumber(g.SB_ULTRA_SEL) or 0.2 end,
-        function(v) g.SB_ULTRA_SEL = math.floor(v * 100 + 0.5) / 100 end,
-        function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 4, "Castet nur nativ (dein Klick). Laedt den naechsten Spell ueber das echte Rad (~0.2s, einstellbar), sobald der geladene verbraucht ist, und ueberspringt Spells auf Abklingzeit. Fake-Zeiger gleitet weich zum Silent-Aim-Ziel und ist auf Aufnahmen sichtbar. Rotation = Safe-Combat-Slots, die im Rad liegen.", 88)
     end)
 
   -- === Troll-Panel ===
@@ -3924,7 +3398,15 @@ local function mountGui()
         function(v) return string.format("%.2fs", v) end)
       makeToggleW(sf, 3, "Terrain-Blase", function() return g.SB_SNIPE_CARVE ~= false end,
         function() g.SB_SNIPE_CARVE = not (g.SB_SNIPE_CARVE ~= false) end)
-      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 4
+      makeToggleW(sf, 5, "Lobotomy-Mode", function() return g.SB_SNIPE_LOBO == true end,
+        function() g.SB_SNIPE_LOBO = not (g.SB_SNIPE_LOBO == true) end)
+      makeSliderW(sf, 6, "Lobo-Zeit", 0.2, 2, function() return tonumber(g.SB_SNIPE_LOBO_T) or 0.6 end,
+        function(v) g.SB_SNIPE_LOBO_T = math.floor(v * 10 + 0.5) / 10 end,
+        function(v) return string.format("%.1fs", v) end)
+      makeSliderW(sf, 7, "Lobo-Abstand", 3, 20, function() return tonumber(g.SB_SNIPE_LOBO_DIST) or 6 end,
+        function(v) g.SB_SNIPE_LOBO_DIST = math.floor(v + 0.5) end,
+        function(v) return math.floor(v + 0.5) .. " Studs" end)
+      local sn = Instance.new("TextLabel"); sn.Size = UDim2.new(1, -12, 0, 46); sn.LayoutOrder = 8
       sn.BackgroundTransparency = 1; sn.Font = Enum.Font.Gotham; sn.TextSize = 11
       sn.TextColor3 = Color3.fromRGB(150, 150, 170); sn.TextWrapped = true
       sn.TextXAlignment = Enum.TextXAlignment.Left; sn.Parent = sf
@@ -3980,9 +3462,7 @@ local function mountGui()
         function(v) return string.format("%.2fs", v) end)
       makeToggleW(sf, 5, "Terrain-Schacht", function() return g.SB_LOCK_CARVE ~= false end,
         function() g.SB_LOCK_CARVE = not (g.SB_LOCK_CARVE ~= false) end)
-      makeToggleW(sf, 6, "Extra-Schuss von daheim", function() return g.SB_LOCK_FOLLOW ~= false end,
-        function() g.SB_LOCK_FOLLOW = not (g.SB_LOCK_FOLLOW ~= false) end)
-      local lb = Instance.new("TextLabel"); lb.Size = UDim2.new(1, -12, 0, 46); lb.LayoutOrder = 7
+      local lb = Instance.new("TextLabel"); lb.Size = UDim2.new(1, -12, 0, 46); lb.LayoutOrder = 6
       lb.BackgroundTransparency = 1; lb.Font = Enum.Font.Gotham; lb.TextSize = 11
       lb.TextColor3 = Color3.fromRGB(150, 150, 170); lb.TextWrapped = true
       lb.TextXAlignment = Enum.TextXAlignment.Left; lb.Parent = sf
@@ -4030,18 +3510,7 @@ local function mountGui()
         function() g.SB_FARM_FIXWAND = not g.SB_FARM_FIXWAND end)
       makeToggleW(sf, 15, "Fliegende/Apparierende auslassen", function() return g.SB_FARM_SKIP_AIR == true end,
         function() g.SB_FARM_SKIP_AIR = not g.SB_FARM_SKIP_AIR end)
-      makeToggleW(sf, 16, "Spieler im Clash auslassen", function() return g.SB_FARM_SKIP_CLASH == true end,
-        function() g.SB_FARM_SKIP_CLASH = not g.SB_FARM_SKIP_CLASH end)
-      addInfo(sf, 17, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
-    end)
-  addModule(farm, "Auto-Seal",
-    function() return g.SB_SEAL end,
-    function(v) g.SB_SEAL = v; if v then startSealAuto(); startSealAttune() end end,
-    function(sf)
-      makeSliderW(sf, 1, "Reaktionszeit", 0, 1.5, function() return tonumber(g.SB_SEAL_DELAY) or 0.35 end,
-        function(v) g.SB_SEAL_DELAY = math.floor(v * 100 + 0.5) / 100 end,
-        function(v) return string.format("%.2fs", v) end)
-      addInfo(sf, 2, "Clash Seal: castet in Reichweite automatisch auf den Orb (attunen). Das Minigame danach laeuft ueber das normale Clash-UI und wird von Auto-Clash gespielt - die Seal-Farm schaltet Auto-Clash selbst mit.", 64)
+      addInfo(sf, 16, "Map wird nur ausgehaengt, nicht zerstoert: mit 'Map beim Stoppen zurueck' ist beim Ausschalten alles wieder da. Terrain-Blase = pro Spot nur ein kleines Loch (gesichert, kommt zurueck). 'Terrain global loeschen' ist endgueltig - nur ein Rejoin holt es wieder.", 76)
     end)
   addModule(farm, "Seal-Farm",
     function() return g.SB_SEALFARM end,
@@ -4221,15 +3690,15 @@ local function mountGui()
     function() return g.SB_STREAMPROOF == true end,
     function(v) setStreamproof(v) end)
 
-  -- === ArrayList (unten rechts, immer sichtbar, waechst nach oben) ===
+  -- === ArrayList (oben rechts, immer sichtbar) ===
   local arrayHolder = Instance.new("Frame")
-  local AL_BOTTOM = 12
-  arrayHolder.AnchorPoint = Vector2.new(1, 1); arrayHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM)
+  local AL_INSET = 52
+  pcall(function() AL_INSET = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
+  arrayHolder.AnchorPoint = Vector2.new(1, 0); arrayHolder.Position = UDim2.new(1, -6, 0, AL_INSET)
   arrayHolder.Size = UDim2.fromOffset(0, 0); arrayHolder.AutomaticSize = Enum.AutomaticSize.XY
   arrayHolder.BackgroundTransparency = 1; arrayHolder.Parent = gui
   local al = Instance.new("UIListLayout", arrayHolder); al.SortOrder = Enum.SortOrder.LayoutOrder
   al.HorizontalAlignment = Enum.HorizontalAlignment.Right; al.Padding = UDim.new(0, 2)
-  al.VerticalAlignment = Enum.VerticalAlignment.Bottom
   local ACTIVE = {
     { "Silent-Aim",  function() return g.SB_AIM end },
     { "Auto-Shield", function() return g.SB_SHIELD end },
@@ -4237,7 +3706,6 @@ local function mountGui()
     { "Auto-Seal",   function() return g.SB_SEAL end },
     { "Auto-Dodge",  function() return g.SB_DODGE end },
     { "Safe-Combat", function() return g.SB_SAFE end },
-    { "Ultra Legit", function() return g.SB_ULTRA end },
     { "Autofarm",    function() return g.SB_FARM end },
     { "Shotgun",     function() return g.SB_SHOT end },
     { "De-Wand",     function() return g.SB_DEWAND end },
@@ -4245,14 +3713,13 @@ local function mountGui()
     { "KD-Farm",     function() return g.SB_KD end },
     { "Seal-Farm",   function() return g.SB_SEALFARM end },
   }
-  -- Geblendeten-Liste direkt ueber der ArrayList (nur bei aktivem See-Obscuro)
+  -- Geblendeten-Liste direkt unter der ArrayList (nur bei aktivem See-Obscuro)
   local obscHolder = Instance.new("Frame")
-  obscHolder.AnchorPoint = Vector2.new(1, 1); obscHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM)
+  obscHolder.AnchorPoint = Vector2.new(1, 0); obscHolder.Position = UDim2.new(1, -6, 0, AL_INSET + 150)
   obscHolder.Size = UDim2.fromOffset(0, 0); obscHolder.AutomaticSize = Enum.AutomaticSize.XY
   obscHolder.BackgroundTransparency = 1; obscHolder.Parent = gui
   local ol = Instance.new("UIListLayout", obscHolder); ol.SortOrder = Enum.SortOrder.LayoutOrder
   ol.HorizontalAlignment = Enum.HorizontalAlignment.Right; ol.Padding = UDim.new(0, 2)
-  ol.VerticalAlignment = Enum.VerticalAlignment.Bottom
   local function rebuildObscuro()
     for _, c in ipairs(obscHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
     if not g.SB_OBSC then return end
@@ -4273,7 +3740,7 @@ local function mountGui()
     for _, c in ipairs(arrayHolder:GetChildren()) do if c:IsA("TextLabel") then c:Destroy() end end
     local on = {}
     for _, m in ipairs(ACTIVE) do if m[2]() then on[#on + 1] = m[1] end end
-    table.sort(on, function(a, b) return #a < #b end)   -- unten verankert: laengster Eintrag ganz unten
+    table.sort(on, function(a, b) return #a > #b end)
     for idx, nm in ipairs(on) do
       local t = Instance.new("TextLabel"); t.AutomaticSize = Enum.AutomaticSize.X
       t.Size = UDim2.fromOffset(0, 24); t.LayoutOrder = idx
@@ -4286,9 +3753,6 @@ local function mountGui()
       local b = Instance.new("Frame"); b.Size = UDim2.new(0, 3, 1, 0); b.Position = UDim2.new(1, 0, 0, 0)
       b.BorderSizePixel = 0; b.BackgroundColor3 = ACCENT; b.Parent = t
     end
-    -- Geblendeten-Liste sitzt oberhalb der ArrayList
-    local h = (#on > 0) and (#on * 26) or 0
-    obscHolder.Position = UDim2.new(1, -6, 1, -AL_BOTTOM - h - (h > 0 and 8 or 0))
   end
 
   -- Refresh-Loop: Modul-Farben + ArrayList (Toggles via Hotkey/extern spiegeln)
@@ -4335,6 +3799,7 @@ local function mountGui()
     pcall(function() ins = math.max(game:GetService("GuiService"):GetGuiInset().Y, 40) + 12 end)
     if wmBox.Position.Y.Offset ~= ins then
       wmBox.Position = UDim2.fromOffset(10, ins)
+      arrayHolder.Position = UDim2.new(1, -6, 0, ins)
     end
   end
 
