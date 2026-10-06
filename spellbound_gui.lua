@@ -45,6 +45,7 @@ g.SB_DODGE_SKIPACC = 0           -- Prozent-Gate Akkumulator (Pattern-Reset)
 g.SB_DODGE_PCT = tonumber(g.SB_DODGE_PCT) or 100   -- Dodge-Rate in % (bleibt erhalten)
 g.SB_LEGIT = tonumber(g.SB_LEGIT) or 0             -- Legitness 0-100%: so viel % ALLER Cheat-Aktionen failen absichtlich
 g.SB_CURSE_LOOP, g.SB_AIM_LOOP, g.SB_CLASH_LOOP = false, false, false
+g.SB_ACQ_GEN = (tonumber(g.SB_ACQ_GEN) or 0) + 1        -- alte Wand-Sucher-Loops beenden
 g.SB_SHOT, g.SB_SHOT_LOOP = false, false          -- Shotgun (6er-Burst) beim Reload aus
 g.SB_SHOT_HOOKED, g.SB_SHOT_REQ = false, false    -- Klick-Trigger wird beim Reload neu gelegt
 g.SB_SHOT_IDX   = tonumber(g.SB_SHOT_IDX)   or 1  -- Position in der alphabetischen Liste
@@ -122,7 +123,7 @@ local function isMine(f)
 end
 local function acquire()
   local setLoadedSpell, fireSpell, state
-  for _, f in ipairs(getgc(true)) do
+  for _, f in ipairs(getgc()) do                   -- nur Funktionen (getgc(true) = alle Tabellen = Lag)
     if type(f) == "function" then
       local ok, info = pcall(debug.getinfo, f)
       if ok and info and type(info.source) == "string" and info.source:find("WandClient") then
@@ -296,7 +297,9 @@ local function startSelector()
   g.SB_CURSE_LOOP = true
   task.spawn(function()
     local nextAcquire = 0
-    while g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM do
+    local acqTriedWand, reequippedWand
+    local myGen = g.SB_ACQ_GEN                       -- Reload erhoeht -> alter Loop endet
+    while myGen == g.SB_ACQ_GEN and (g.SB_SAFE or g.SB_AIM or g.SB_APPA_PENDING or g.SB_FARM) do
       pcall(function()
         if not g.SB_MOUSE then
           local okM, pm = pcall(function() return require(RS.shared.modules.PlayerMouse) end)
@@ -310,12 +313,27 @@ local function startSelector()
         end
         local refs = g.SB_REFS
         if not (refs and refs.state and refs.state.equipped) then
-          if os.clock() < nextAcquire then g.SB_STATUS = "warte auf Wand..."; return end
-          nextAcquire = os.clock() + 1.5
+          -- getgc ist teuer: nach Fehlschlag nur neu suchen, wenn eine ANDERE Wand in der Hand
+          -- ist, sonst hoechstens alle 20s
+          if os.clock() < nextAcquire and wand == acqTriedWand then g.SB_STATUS = "warte auf Wand..."; return end
+          acqTriedWand = wand
+          nextAcquire = os.clock() + 20
           local set, st, fire = acquire()
           if set and st and st.equipped and fire then
             g.SB_REFS = { set = set, state = st, fire = fire }
-          else g.SB_STATUS = "lade Wand..."; return end
+          else
+            g.SB_STATUS = "lade Wand..."
+            -- nach Respawn steht die Wand oft nicht auf "equipped" -> einmal ab- und anlegen
+            if set and st and not st.equipped and reequippedWand ~= wand then
+              reequippedWand = wand
+              task.spawn(function()
+                hum:UnequipTools(); task.wait(0.15)
+                if wand.Parent then hum:EquipTool(wand) end
+              end)
+              nextAcquire = os.clock() + 0.6
+            end
+            return
+          end
           refs = g.SB_REFS
         end
         g.SB_STATUS = nil
@@ -333,8 +351,7 @@ local function startSelector()
       end)
       task.wait(0.1)
     end
-    g.SB_CURSE_LOOP = false
-    g.SB_STATUS = nil
+    if myGen == g.SB_ACQ_GEN then g.SB_CURSE_LOOP = false; g.SB_STATUS = nil end
   end)
 end
 
