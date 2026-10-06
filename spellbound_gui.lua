@@ -130,7 +130,8 @@ local function acquire()
         if hasConsts(f, {"canLoadSpell","elderOnly","list"}) and isMine(f) then
           setLoadedSpell = f
           for _, v in pairs(debug.getupvalues(f)) do
-            if type(v) == "table" and rawget(v,"casts") ~= nil and (rawget(v,"loadedSpell") ~= nil or rawget(v,"equipped") ~= nil) then state = v end
+            -- nach Respawn ist der State noch leer ({lumosEnabled, equipped}) - casts kommt erst beim 1. Cast
+            if type(v) == "table" and rawget(v,"equipped") ~= nil and (rawget(v,"casts") ~= nil or rawget(v,"lumosEnabled") ~= nil) then state = v end
           end
         end
         if hasConsts(f, {"isClashing","lastCastTime"}) and isMine(f) then fireSpell = f end
